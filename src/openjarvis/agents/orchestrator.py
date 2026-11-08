@@ -475,6 +475,21 @@ def _requested_item_kind(input_text: str) -> str | None:
     return None
 
 
+def _requested_list_count(input_text: str) -> int | None:
+    """Return an explicit requested list size without depending on its subject."""
+    text = _plain_text(input_text)
+    match = re.search(
+        r"\b(?:(\d+)|(um|uma|dois|duas|tres|quatro|cinco|seis|sete|oito))\s+"
+        r"(?:(?:melhores|principais|recomendad[oa]s?)\s+)?[a-z]{3,}",
+        text,
+    )
+    if not match:
+        return None
+    if match.group(1):
+        return min(int(match.group(1)), 8)
+    return {**_NUMBER_WORD_COUNTS, "seis": 6, "sete": 7, "oito": 8}.get(match.group(2))
+
+
 def _research_ledger_from_message(message: Message) -> list[dict[str, str]]:
     """Recover provenance from one specific assistant answer."""
     match = _RESEARCH_LEDGER_RE.search(message.text)
@@ -540,6 +555,10 @@ def _presented_items(text: str) -> list[str]:
             r"^\s*#{1,6}\s*\d+[.)]?\s*(?:\*\*)?(?P<item>[^\n:*]{2,100})",
             re.MULTILINE,
         ),
+        re.compile(
+            r"^\s*#{2,6}\s*(?:\*\*)?(?P<item>[^\n:*]{2,100})",
+            re.MULTILINE,
+        ),
     )
     for pattern in patterns:
         for match in pattern.finditer(text):
@@ -558,8 +577,6 @@ def _research_context_marker(input_text: str, answer: str) -> str:
     """
     kind = _requested_item_kind(input_text)
     items = _presented_items(answer)
-    if kind == "paises":
-        items = _countries_from_context([Message(role=Role.ASSISTANT, content=answer)])
     if not kind or len(items) < 2:
         return ""
     payload = json.dumps({"kind": kind, "items": items[:8]}, ensure_ascii=False)
@@ -611,7 +628,8 @@ def _referenced_research_message(
     different topic from the chat.
     """
     count, requested_kind = _choice_reference(input_text)
-    candidates: list[Message] = []
+    recorded_candidates: list[Message] = []
+    legacy_candidates: list[Message] = []
     for message in reversed(messages):
         if message.role != Role.ASSISTANT:
             continue
@@ -621,16 +639,20 @@ def _referenced_research_message(
                 continue
             if count and len(recorded["items"]) < count:
                 continue
-            candidates.append(message)
+            recorded_candidates.append(message)
             continue
         # Compatibility path for earlier conversations, recorded before the
         # structured marker existed.  It stays narrow: a country reference
         # needs an actual multi-country answer, not a passing mention.
         if requested_kind == "paises":
             if len(_countries_from_context([message])) >= (count or 2):
-                candidates.append(message)
+                legacy_candidates.append(message)
         elif not requested_kind and len(_presented_items(message.text)) >= (count or 2):
-            candidates.append(message)
+            legacy_candidates.append(message)
+    # Structured markers are authored by this system for option resolution.
+    # They always outrank incidental Markdown lists such as a later list of
+    # sources, which must never turn the reference into an ambiguity.
+    candidates = recorded_candidates or legacy_candidates
     if not candidates:
         return None
     if requested_kind:
@@ -884,6 +906,23 @@ def _web_search_queries(
     if _choice_follow_up_instruction(input_text) and choice_options:
         criterion = _choice_research_criteria(input_text)
         return [f"{option} {criterion}".strip() for option in choice_options]
+
+    requested_count = _requested_list_count(input_text)
+    if requested_count and requested_count >= 4:
+        base_query = _web_search_query(input_text, context_messages, documents)
+        refinements = (
+            "critérios e comparação",
+            "alternativas recomendadas",
+            "custo e qualidade",
+            "guia atualizado",
+            "opções relevantes",
+            "vantagens e limitações",
+            "comparativo atual",
+        )
+        return [base_query] + [
+            f"{base_query} {refinement}"
+            for refinement in refinements[: requested_count - 1]
+        ]
 
     count = _ordinal_context_count(input_text)
     if not count:
@@ -1398,6 +1437,18 @@ def _web_grounded_input(
         if requested_kind
         else ""
     )
+    requested_count = _requested_list_count(input_text)
+    count_instruction = (
+        "\n<requested_list_coverage>\n"
+        + f"O usuário pediu {requested_count} itens. Entregue exatamente {requested_count} "
+        + "itens distintos quando a evidência combinada os sustentar. Não exija que "
+        + "uma única fonte traga a lista completa: componha a resposta a partir das "
+        + "fontes pesquisadas. Só entregue menos itens se, mesmo após as consultas "
+        + "complementares, faltar evidência para os demais; nesse caso explique qual "
+        + "cobertura faltou.\n</requested_list_coverage>"
+        if requested_count
+        else ""
+    )
     direct_answer_instruction = (
         "\n<answer_quality>\n"
         "Responda diretamente ao pedido. Quando os resultados permitem uma "
@@ -1431,6 +1482,7 @@ def _web_grounded_input(
         + sensitive_instruction
         + scope_instruction
         + item_kind_instruction
+        + count_instruction
         + direct_answer_instruction
         + _evidence_prompt_instruction(
             safe_source_count=safe_source_count,

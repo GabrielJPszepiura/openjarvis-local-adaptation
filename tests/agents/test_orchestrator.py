@@ -21,6 +21,7 @@ from openjarvis.agents.orchestrator import (
     _links_requested,
     _needs_evidence_research,
     _research_context_marker,
+    _requested_list_count,
     _source_ledger_marker,
     _web_grounded_input,
     _web_search_query,
@@ -298,6 +299,18 @@ class TestOrchestratorAgent:
         ]
 
         assert _choice_prior_research_context("Entre esses três, qual é melhor?", messages) == ""
+
+    def test_requested_five_item_list_gets_complementary_research_coverage(self):
+        request = "Pesquise os 5 melhores países para fazer intercâmbio."
+
+        queries = _web_search_queries(request)
+        grounded = _web_grounded_input(request, "Resultados.", show_links=False)
+
+        assert _requested_list_count(request) == 5
+        assert len(queries) == 5
+        assert queries[0] == "os 5 melhores países para fazer intercâmbio."
+        assert "O usuário pediu 5 itens" in grounded
+        assert "uma única fonte traga a lista completa" in grounded
 
     def test_explicit_word_request_creates_file_when_model_omits_tool(self, tmp_path):
         engine = _make_engine_no_tools("Resumo produzido a partir das planilhas.")
