@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+import unicodedata
 from pathlib import Path
 from typing import Any, Iterable, List, Optional
 
@@ -32,6 +33,34 @@ def _safe_filename(filename: str, extension: str) -> str:
     if not raw or raw in {".", ".."}:
         raise ValueError("A valid filename is required.")
     return raw if raw.lower().endswith(extension) else raw + extension
+
+
+def _semantic_filename(filename: str, extension: str, *, title: str, content: str) -> str:
+    """Replace only generic timestamp names with a compact subject-based name."""
+    raw = _safe_filename(filename, extension)
+    stem = Path(raw).stem.casefold()
+    if not re.fullmatch(r"(?:resumo|relatorio)_\d{8}_\d{6}", stem):
+        return raw
+
+    heading = next(
+        (
+            match.group(1)
+            for line in content.splitlines()
+            if (match := re.match(r"^#\s+(.+)$", line.strip()))
+        ),
+        "",
+    )
+    subject = heading or title
+    normalized = unicodedata.normalize("NFKD", subject)
+    normalized = "".join(char for char in normalized if not unicodedata.combining(char))
+    words = re.findall(r"[a-z0-9]+", normalized.casefold())
+    ignored = {
+        "analise", "detalhada", "arquivo", "word", "relatorio", "resumo",
+        "sobre", "do", "da", "de", "em", "no", "na", "o", "a",
+    }
+    topic = "_".join(word for word in words if word not in ignored)[:80].strip("_")
+    prefix = "relatorio" if stem.startswith("relatorio") else "resumo"
+    return f"{prefix}_{topic}{extension}" if topic else raw
 
 
 def _is_within(path: Path, roots: Iterable[Path]) -> bool:
@@ -158,12 +187,18 @@ class CreateDocumentTool(_LocalOutputTool):
                 f"Document content is too large (maximum {_MAX_TEXT_CHARS} characters)."
             )
         try:
-            path = self._output_path(
+            title = str(params.get("title", "")).strip()
+            filename = _semantic_filename(
                 str(params.get("filename", "")),
+                f".{fmt}",
+                title=title,
+                content=content,
+            )
+            path = self._output_path(
+                filename,
                 f".{fmt}",
                 overwrite=bool(params.get("overwrite", False)),
             )
-            title = str(params.get("title", "")).strip()
             if fmt == "docx":
                 self._create_docx(path, title, content)
             else:

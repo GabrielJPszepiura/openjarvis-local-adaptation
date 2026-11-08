@@ -15,6 +15,7 @@ from openjarvis.agents.orchestrator import (
     _filter_research_evidence,
     _hide_unrequested_links,
     _hide_unretrieved_links,
+    _choice_follow_up_instruction,
     _links_requested,
     _needs_evidence_research,
     _web_grounded_input,
@@ -212,6 +213,15 @@ def _make_engine_multi_tool() -> MagicMock:
 
 
 class TestOrchestratorAgent:
+    def test_contextual_choice_requests_a_single_focused_recommendation(self):
+        instruction = _choice_follow_up_instruction(
+            "Entre esses três, qual você indicaria para uma primeira viagem?"
+        )
+
+        assert "uma única opção" in instruction
+        assert "não repita a apresentação completa" in instruction
+        assert _choice_follow_up_instruction("Compare Japão e Croácia.") == ""
+
     def test_explicit_word_request_creates_file_when_model_omits_tool(self, tmp_path):
         engine = _make_engine_no_tools("Resumo produzido a partir das planilhas.")
         agent = OrchestratorAgent(
