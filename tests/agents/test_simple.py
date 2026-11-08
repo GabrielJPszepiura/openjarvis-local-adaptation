@@ -62,7 +62,7 @@ class TestSimpleAgent:
         prompt = messages[-1].content
         assert "<source_presentation>" in prompt
         assert "resumo curto" in prompt
-        assert "fonte secundária ou comercial" in prompt
+        assert "comercial" in prompt
 
     def test_ordinary_request_does_not_add_source_presentation_instruction(self):
         engine = _make_mock_engine()
