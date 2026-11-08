@@ -16,6 +16,7 @@ from openjarvis.agents.orchestrator import (
     _hide_unrequested_links,
     _hide_unretrieved_links,
     _choice_follow_up_instruction,
+    _choice_options,
     _choice_prior_research_context,
     _links_requested,
     _needs_evidence_research,
@@ -260,6 +261,7 @@ class TestOrchestratorAgent:
 
         prior = _choice_prior_research_context(request, messages)
         query = _web_search_query(request, messages)
+        queries = _web_search_queries(request, messages)
 
         assert "Japão" in prior
         assert "Croácia" in prior
@@ -268,6 +270,12 @@ class TestOrchestratorAgent:
         assert "Japão" in query
         assert "Croácia" in query
         assert "Brasil" not in query
+        assert _choice_options(request, messages) == ["Japão", "Croácia", "Espanha"]
+        assert queries == [
+            "Japão uma primeira viagem",
+            "Croácia uma primeira viagem",
+            "Espanha uma primeira viagem",
+        ]
 
     def test_ambiguous_choice_does_not_merge_two_untyped_option_sets(self):
         first = (

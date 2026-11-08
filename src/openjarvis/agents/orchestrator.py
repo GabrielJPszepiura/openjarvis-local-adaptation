@@ -638,6 +638,30 @@ def _referenced_research_message(
     return candidates[0] if len(candidates) == 1 else None
 
 
+def _choice_options(input_text: str, messages: list[Message]) -> list[str]:
+    """Return the exact earlier options that a choice is allowed to select."""
+    message = _referenced_research_message(input_text, messages)
+    if message is None:
+        return []
+    recorded = _research_context_from_message(message)
+    if recorded:
+        return list(recorded["items"])
+    _, requested_kind = _choice_reference(input_text)
+    if requested_kind == "paises":
+        return _countries_from_context([message])
+    return _presented_items(message.text)
+
+
+def _choice_research_criteria(input_text: str) -> str:
+    """Keep the user's decision criterion while removing the old option label."""
+    text = _plain_text(input_text)
+    match = re.search(r"\bpara\s+(.+)", text)
+    if match:
+        return match.group(1).strip(" .,:;?")
+    text = re.sub(r"^.*?\b(?:qual|melhor|indicaria|recomenda)\b", "", text)
+    return text.strip(" .,:;?") or "comparação"
+
+
 def _choice_prior_research_context(input_text: str, messages: list[Message]) -> str:
     """Provide only the resolved earlier research, never unrelated chat turns."""
     message = _referenced_research_message(input_text, messages)
@@ -647,6 +671,7 @@ def _choice_prior_research_context(input_text: str, messages: list[Message]) -> 
     body = _RESEARCH_CONTEXT_RE.sub("", body).strip()
     body = body[:3000].rstrip()
     sources = _research_ledger_from_message(message)
+    options = _choice_options(input_text, messages)
     source_lines = "\n".join(
         f"- {source['title']}: {source['url']}" for source in sources[:6]
     )
@@ -654,6 +679,7 @@ def _choice_prior_research_context(input_text: str, messages: list[Message]) -> 
         "\n<prior_research_context>\n"
         "Pesquisa anterior vinculada às opções referidas neste pedido. Use-a "
         "junto da pesquisa nova; não use nenhuma outra parte do histórico.\n"
+        + ("Opções permitidas para a escolha: " + "; ".join(options) + ".\n" if options else "")
         + body
         + ("\nFontes registradas:\n" + source_lines if source_lines else "")
         + "\n</prior_research_context>"
@@ -851,6 +877,14 @@ def _web_search_queries(
     retrieval pass, so unrelated evidence for one item cannot pretend to cover
     every item in the comparison.
     """
+    # A selection is not an open recommendation.  Search each previously
+    # presented option under the user's criterion, so a generic result about
+    # a fourth country/product cannot become the answer by accident.
+    choice_options = _choice_options(input_text, context_messages or [])
+    if _choice_follow_up_instruction(input_text) and choice_options:
+        criterion = _choice_research_criteria(input_text)
+        return [f"{option} {criterion}".strip() for option in choice_options]
+
     count = _ordinal_context_count(input_text)
     if not count:
         return [_web_search_query(input_text, context_messages, documents)]
@@ -1692,12 +1726,26 @@ class OrchestratorAgent(ToolUsingAgent):
             input if creation_requested else _chat_format_instruction(input)
         )
         choice_instruction = _choice_follow_up_instruction(decision.instruction)
+        choice_options = (
+            _choice_options(decision.instruction, context_messages)
+            if choice_instruction
+            else []
+        )
         prior_choice_research = (
             _choice_prior_research_context(decision.instruction, context_messages)
             if choice_instruction
             else ""
         )
         analysis_input += choice_instruction + prior_choice_research
+        if choice_options:
+            analysis_input += (
+                "\n<choice_options>\n"
+                "A recomendação deve ser exatamente uma destas opções já "
+                "apresentadas: "
+                + "; ".join(choice_options)
+                + ". Não apresente, recomende, compare como vencedora nem "
+                "substitua por uma quarta opção.\n</choice_options>"
+            )
         if choice_instruction and context_messages and not prior_choice_research:
             analysis_input += (
                 "\n<choice_reference_resolution>\n"
