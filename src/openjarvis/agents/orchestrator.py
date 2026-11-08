@@ -497,7 +497,7 @@ def _research_ledger_from_message(message: Message) -> list[dict[str, str]]:
                 {
                     "title": title,
                     "url": url,
-                    "label": str(item.get("label", "")),
+                    "summary": str(item.get("summary", "")).strip(),
                 }
             )
     return sources
@@ -520,7 +520,7 @@ def _source_ledger_marker(sources: list[dict[str, object]]) -> str:
         {
             "title": str(source.get("title", "")),
             "url": str(source.get("url", "")),
-            "label": str(source.get("label", "")),
+            "summary": str(source.get("summary", "")).strip(),
         }
         for source in sources
         if source.get("title") and source.get("url")
@@ -664,9 +664,23 @@ def _format_recorded_sources(sources: list[dict[str, str]]) -> str:
     """Render links from the answer's provenance ledger, never invented links."""
     lines = ["Estas são as fontes usadas na resposta anterior:", ""]
     for source in sources:
-        suffix = f" — {source['label']}" if source.get("label") else ""
-        lines.append(f"- [{source['title']}]({source['url']}){suffix}")
+        summary = source.get("summary", "")
+        if not summary:
+            summary = (
+                "Registrada como evidência da resposta anterior; essa conversa "
+                "foi criada antes de o resumo da fonte passar a ser salvo."
+            )
+        lines.append(f"- [{source['title']}]({source['url']})")
+        lines.append(f"  {summary}")
     return "\n".join(lines)
+
+
+def _source_summary(text: object, *, limit: int = 320) -> str:
+    """Keep a readable, source-grounded summary for later provenance display."""
+    summary = re.sub(r"\s+", " ", str(text)).strip()
+    if len(summary) <= limit:
+        return summary
+    return summary[:limit].rsplit(" ", 1)[0].rstrip(".,;:") + "…"
 
 
 def _commercial_source_note(sources: list[dict[str, object]]) -> str:
@@ -2178,7 +2192,13 @@ class OrchestratorAgent(ToolUsingAgent):
                 f"Verificação: {evidence_mode}\n"
                 f"Conteúdo: {evidence_text}"
             )
-            approved_sources.append({"title": candidate["title"], "url": url})
+            approved_sources.append(
+                {
+                    "title": candidate["title"],
+                    "url": url,
+                    "summary": _source_summary(evidence_text),
+                }
+            )
             approved_profiles.append(
                 {"title": candidate["title"], "url": url, **profile}
             )
