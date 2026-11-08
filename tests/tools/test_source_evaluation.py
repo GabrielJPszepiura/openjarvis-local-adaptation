@@ -29,6 +29,18 @@ def test_domain_convention_is_not_presented_as_verified_official(tmp_path: Path)
     assert "provável" in profile.label
 
 
+def test_government_conventions_cover_non_gov_country_namespaces(tmp_path: Path):
+    cache = SourceProfileCache(tmp_path / "profiles.json")
+
+    french = evaluate_source("https://www.gouv.fr/guide", cache=cache)
+    japanese = evaluate_source("https://www.go.jp/visa", cache=cache)
+
+    assert french.category == "government_domain"
+    assert japanese.category == "government_domain"
+    assert french.institutional is True
+    assert japanese.primary_candidate is True
+
+
 def test_secondary_source_is_not_an_institutional_candidate(tmp_path: Path):
     profile = evaluate_source(
         "https://agency.example/guide",

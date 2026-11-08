@@ -16,6 +16,7 @@ from openjarvis.agents.orchestrator import (
     _hide_unrequested_links,
     _hide_unretrieved_links,
     _links_requested,
+    _needs_evidence_research,
     _web_grounded_input,
     _web_search_queries,
 )
@@ -352,6 +353,157 @@ class TestOrchestratorAgent:
         assert [item.tool_name for item in result.tool_results] == ["web_search"]
         assert result.metadata["tool_route"] == "web_only"
 
+    def test_recommendation_routes_to_research_without_model_rewriting_query(self):
+        engine = _make_engine_no_tools("Três países.")
+        web = _WebSearchStub()
+        agent = OrchestratorAgent(engine, "test-model", tools=[web])
+
+        result = agent.run(
+            "Quais são três países que você recomenda para turismo hoje?"
+        )
+
+        assert web.calls[0]["query"] == (
+            "Quais são três países que você recomenda para turismo hoje?"
+        )
+        assert result.metadata["tool_route"] == "web_only"
+
+    def test_low_cost_recommendation_routes_to_research(self):
+        engine = _make_engine_no_tools("Uma recomendação fundamentada.")
+        web = _WebSearchStub()
+        agent = OrchestratorAgent(engine, "test-model", tools=[web])
+
+        result = agent.run("Qual é o melhor país para viajar gastando menos?")
+
+        assert web.calls[0]["query"] == (
+            "Qual é o melhor país para viajar gastando menos?"
+        )
+        assert result.metadata["tool_route"] == "web_only"
+
+    def test_factual_requests_use_evidence_without_subject_word_lists(self):
+        assert _needs_evidence_research("Qual é a dívida pública do Brasil?")
+        assert _needs_evidence_research("O que é dipirona?")
+        assert _needs_evidence_research("Compare estes dois tratamentos.")
+        assert _needs_evidence_research("Explique a fotossíntese.")
+
+    def test_non_factual_requests_do_not_start_web_research(self):
+        assert not _needs_evidence_research("Oi, tudo bem?")
+        assert not _needs_evidence_research("Resuma este texto para mim.")
+        assert not _needs_evidence_research("Crie uma história de ficção curta.")
+        assert not _needs_evidence_research(
+            "Analise o documento anexado.", documents=[("dados.txt", "conteúdo")]
+        )
+
+    def test_sensitive_request_without_safe_evidence_keeps_limited_research(self):
+        engine = _make_engine_no_tools("Tome 500 mg todos os dias.")
+        web = _WebSearchStub()
+        agent = OrchestratorAgent(engine, "test-model", tools=[web])
+
+        result = agent.run(
+            "Quais efeitos colaterais podem ocorrer com este medicamento?"
+        )
+
+        assert "Tome 500 mg" not in result.content
+        assert "profissional de saúde" in result.content
+        assert engine.generate.call_count == 1
+        assert result.metadata["tool_route"] == "web_only"
+
+    def test_travel_result_that_mentions_visas_is_not_sensitive(self):
+        class _TravelWebStub(_WebSearchStub):
+            def execute(self, **params) -> ToolResult:
+                self.calls.append(params)
+                return ToolResult(
+                    tool_name="web_search",
+                    content=(
+                        "### Turismo\nSource: https://travel.example/lista\n"
+                        "Summary: Turismo cultural. Veja também regras de visto."
+                    ),
+                    success=True,
+                )
+
+        engine = _make_engine_no_tools("Resposta turística.")
+        web = _TravelWebStub()
+        agent = OrchestratorAgent(engine, "test-model", tools=[web])
+
+        result = agent.run("Quais países você recomenda para turismo hoje?")
+
+        assert result.metadata["tool_route"] == "web_only"
+        assert engine.generate.call_count == 1
+
+    def test_sensitive_request_without_safe_evidence_does_not_prescribe(self):
+        engine = _make_engine_no_tools("Tome 500 mg todos os dias.")
+        web = _WebSearchStub()
+        agent = OrchestratorAgent(engine, "test-model", tools=[web])
+
+        result = agent.run(
+            "Quais efeitos colaterais podem ocorrer com este medicamento?"
+        )
+
+        assert "500 mg" not in result.content
+        assert "profissional de saúde" in result.content
+
+    def test_link_request_recovers_recorded_sources_without_new_search(self):
+        engine = _make_engine_no_tools("Não deve gerar uma nova resposta.")
+        web = _WebSearchStub()
+        agent = OrchestratorAgent(engine, "test-model", tools=[web])
+        context = AgentContext()
+        context.conversation.add(
+            Message(
+                role=Role.ASSISTANT,
+                content=(
+                    "Resposta anterior.\n<!-- openjarvis-research-sources:"
+                    '[{"title":"Fonte usada","url":"https://example.gov.br/dado",'
+                    '"label":"domínio governamental provável"}] -->'
+                ),
+            )
+        )
+
+        result = agent.run(
+            "Quais foram as fontes usadas? Mostre os links.", context=context
+        )
+
+        assert web.calls == []
+        assert "[Fonte usada](https://example.gov.br/dado)" in result.content
+        assert engine.generate.call_count == 0
+
+    def test_plain_source_question_recovers_recorded_sources(self):
+        engine = _make_engine_no_tools("Não deve gerar uma nova resposta.")
+        web = _WebSearchStub()
+        agent = OrchestratorAgent(engine, "test-model", tools=[web])
+        context = AgentContext()
+        context.conversation.add(
+            Message(
+                role=Role.ASSISTANT,
+                content=(
+                    "Resposta anterior.\n<!-- openjarvis-research-sources:"
+                    '[{"title":"Fonte usada","url":"https://example.gov.br/dado",'
+                    '"label":"domínio governamental provável"}] -->'
+                ),
+            )
+        )
+
+        result = agent.run(
+            "Quais fontes você usou para essa recomendação?", context=context
+        )
+
+        assert web.calls == []
+        assert "[Fonte usada](https://example.gov.br/dado)" in result.content
+        assert engine.generate.call_count == 0
+
+    def test_source_question_without_ledger_does_not_generate_sources(self):
+        engine = _make_engine_no_tools("Fonte inventada.")
+        web = _WebSearchStub()
+        agent = OrchestratorAgent(engine, "test-model", tools=[web])
+        context = AgentContext()
+        context.conversation.add(
+            Message(role=Role.ASSISTANT, content="Resposta antiga sem registro."),
+        )
+
+        result = agent.run("Quais fontes você usou?", context=context)
+
+        assert web.calls == []
+        assert "Não há fontes registradas" in result.content
+        assert engine.generate.call_count == 0
+
     def test_web_search_expands_contextual_country_reference(self):
         engine = _make_engine_no_tools("Pesquisa concluída.")
         web = _WebSearchStub()
@@ -557,11 +709,18 @@ Kaplan\tCanadá
             context=context,
         )
 
-        assert [call["query"] for call in web.calls] == [
+        assert [call["query"] for call in web.calls[:3]] == [
             "Japão vantagens e desvantagens",
             "França vantagens e desvantagens",
             "Espanha vantagens e desvantagens",
         ]
+        assert {
+            call["query"] for call in web.calls[3:]
+        } == {
+            "https://gov.example/japão",
+            "https://gov.example/frança",
+            "https://gov.example/espanha",
+        }
         assert result.tool_results[0].metadata["research_queries"] == [
             "Japão vantagens e desvantagens",
             "França vantagens e desvantagens",
@@ -631,6 +790,203 @@ Kaplan\tCanadá
         assert "Futebol Japão" not in filtered.content
         assert "Turismo no Japão" in filtered.content
         assert filtered.metadata["evidence_blocks_removed"] == 1
+
+    def test_user_style_sensitive_search_opens_relevant_evidence_before_writing(self):
+        class _EvidencePipelineWebStub(_WebSearchStub):
+            government_url = "https://www.canada.ca/student-permit"
+            commercial_url = "https://agency.example/canada-study"
+
+            def execute(self, **params) -> ToolResult:
+                self.calls.append(params)
+                query = params["query"]
+                if query == self.government_url:
+                    return ToolResult(
+                        tool_name="web_search",
+                        content=(
+                            "Requisitos do visto de estudante no Canadá incluem "
+                            "carta de aceitação e comprovação financeira."
+                        ),
+                        success=True,
+                    )
+                if query == self.commercial_url:
+                    return ToolResult(
+                        tool_name="web_search",
+                        content=(
+                            "O visto de estudante no Canadá pode exigir documentos "
+                            "de apoio conforme o curso."
+                        ),
+                        success=True,
+                    )
+                return ToolResult(
+                    tool_name="web_search",
+                    content=(
+                        "### Governo do Canadá: permissão de estudo\n"
+                        f"Source: {self.government_url}\n"
+                        "Summary: Requisitos do visto de estudante no Canadá."
+                        "\n\n---\n\n"
+                        "### Guia comercial\n"
+                        f"Source: {self.commercial_url}\n"
+                        "Summary: Visto de estudante no Canadá para intercâmbio."
+                    ),
+                    success=True,
+                    metadata={
+                        "sources": [
+                            {"url": self.government_url},
+                            {"url": self.commercial_url},
+                        ],
+                        "source_profiles": [
+                            {
+                                "url": self.government_url,
+                                "label": "instituição pública reconhecida",
+                                "institutional": True,
+                                "primary_candidate": True,
+                            },
+                            {
+                                "url": self.commercial_url,
+                                "label": "fonte secundária ou comercial",
+                                "institutional": False,
+                                "primary_candidate": False,
+                            },
+                        ],
+                        "quality": {"sensitive_query": True},
+                    },
+                )
+
+        engine = _make_engine_no_tools("Resposta fundamentada.")
+        web = _EvidencePipelineWebStub()
+        agent = OrchestratorAgent(engine, "test-model", tools=[web])
+
+        result = agent.run(
+            "Pesquise informações atuais sobre os requisitos do visto de "
+            "estudante no Canadá."
+        )
+
+        assert [call["query"] for call in web.calls] == [
+            "informações atuais sobre os requisitos do visto de estudante no Canadá.",
+            web.government_url,
+        ]
+        evidence = result.tool_results[0]
+        assert evidence.metadata["quality"]["safe_source_count"] == 1
+        assert evidence.metadata["quality"]["evidence_mode"] == "page_verified"
+        prompt = engine.generate.call_args.args[0][-1].text
+        assert "<evidence_contract>" in prompt
+        assert "página aberta" in prompt
+        assert "Requisitos do visto de estudante no Canadá incluem" in prompt
+
+    def test_page_that_does_not_cover_the_query_is_not_page_verified(self):
+        class _OffTopicPageWebStub(_WebSearchStub):
+            source_url = "https://gov.example/japan-tourism"
+
+            def execute(self, **params) -> ToolResult:
+                self.calls.append(params)
+                if params["query"] == self.source_url:
+                    return ToolResult(
+                        tool_name="web_search",
+                        content="Resultados de futebol e calendário de partidas.",
+                        success=True,
+                    )
+                return ToolResult(
+                    tool_name="web_search",
+                    content=(
+                        "### Turismo no Japão\n"
+                        f"Source: {self.source_url}\n"
+                        "Summary: Turismo no Japão: vantagens de transporte "
+                        "e segurança."
+                    ),
+                    success=True,
+                    metadata={
+                        "source_profiles": [
+                            {
+                                "url": self.source_url,
+                                "label": "domínio governamental provável",
+                                "institutional": True,
+                                "primary_candidate": True,
+                            }
+                        ]
+                    },
+                )
+
+        engine = _make_engine_no_tools("Resposta.")
+        web = _OffTopicPageWebStub()
+        agent = OrchestratorAgent(engine, "test-model", tools=[web])
+
+        result = agent.run("Pesquise as vantagens do turismo no Japão.")
+
+        evidence = result.tool_results[0]
+        assert evidence.metadata["quality"]["safe_source_count"] == 0
+        assert evidence.metadata["evidence_records"][0]["mode"] == "summary"
+        assert "Resultados de futebol" not in evidence.content
+        assert "Verificação: resumo de busca" in evidence.content
+
+    def test_sensitive_search_retries_once_for_a_safe_source(self):
+        class _SafeRetryWebStub(_WebSearchStub):
+            commercial_url = "https://agency.example/medicine"
+            official_url = "https://gov.example/medicine"
+
+            def execute(self, **params) -> ToolResult:
+                self.calls.append(params)
+                query = params["query"]
+                if query == self.official_url:
+                    return ToolResult(
+                        tool_name="web_search",
+                        content=(
+                            "Dipirona é um medicamento. A orientação de uso deve "
+                            "seguir a bula e um profissional de saúde."
+                        ),
+                        success=True,
+                    )
+                if "órgão regulador" in query:
+                    return ToolResult(
+                        tool_name="web_search",
+                        content=(
+                            "### Bula de dipirona\n"
+                            f"Source: {self.official_url}\n"
+                            "Summary: Informações da bula oficial sobre dipirona."
+                        ),
+                        success=True,
+                        metadata={
+                            "source_profiles": [
+                                {
+                                    "url": self.official_url,
+                                    "label": "domínio governamental provável",
+                                    "institutional": True,
+                                    "primary_candidate": True,
+                                }
+                            ]
+                        },
+                    )
+                return ToolResult(
+                    tool_name="web_search",
+                    content=(
+                        "### Guia comercial de dipirona\n"
+                        f"Source: {self.commercial_url}\n"
+                        "Summary: Dipirona e informações de medicamento."
+                    ),
+                    success=True,
+                    metadata={
+                        "source_profiles": [
+                            {
+                                "url": self.commercial_url,
+                                "label": "fonte secundária ou comercial",
+                                "institutional": False,
+                                "primary_candidate": False,
+                            }
+                        ]
+                    },
+                )
+
+        engine = _make_engine_no_tools("Resposta.")
+        web = _SafeRetryWebStub()
+        agent = OrchestratorAgent(engine, "test-model", tools=[web])
+
+        result = agent.run("Pesquise informações sobre dipirona.")
+
+        evidence = result.tool_results[0]
+        assert len(web.calls) == 3
+        assert "órgão regulador" in web.calls[1]["query"]
+        assert web.calls[2]["query"] == web.official_url
+        assert evidence.metadata["secure_source_retry"] is True
+        assert evidence.metadata["quality"]["safe_source_count"] == 1
 
     def test_web_response_removes_links_not_returned_by_the_tool(self):
         response = (

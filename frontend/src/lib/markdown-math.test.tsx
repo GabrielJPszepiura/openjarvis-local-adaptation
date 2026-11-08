@@ -30,11 +30,12 @@ describe('patched KaTeX with the Markdown plugins', () => {
 
   it('renders currency markers literally without disabling equations', () => {
     const html = renderMath(
-      escapeCurrencyDollars('De R$ 5.000 a US$ 20.000; fórmula $x^2$.'),
+      escapeCurrencyDollars('De R$ 5.000 a US$20.000 e $ 50; fórmula $x^2$.'),
     );
 
     expect(html).toContain('R$ 5.000');
-    expect(html).toContain('US$ 20.000');
+    expect(html).toContain('US$20.000');
+    expect(html).toContain('$ 50');
     expect(html).toContain('class="katex"');
   });
 });
