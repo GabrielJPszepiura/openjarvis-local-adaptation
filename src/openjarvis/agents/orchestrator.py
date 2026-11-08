@@ -176,6 +176,9 @@ _COMMON_COUNTRY_NAMES = {
 _LINK_REQUEST_RE = re.compile(
     r"(?:\b(?:quais?|que|mostre|envie|inclua|liste|informe|forneca|cite)\b"
     r".{0,48}\b(?:link|links|url|urls|fonte|fontes|referencia|referencias)\b|"
+    r"\b(?:me\s+)?(?:passe|passa|mostre|envie|forneca|liste)\s+"
+    r"(?:as\s+)?(?:link|links|url|urls|fonte|fontes|referencia|referencias)"
+    r"(?:\s+(?:da\s+|de\s+)?pesquisa)?\b|"
     r"\b(?:link|links|url|urls|fonte|fontes|referencia|referencias)\b\s*"
     r"(?:que\s+)?(?:voce\s+)?(?:usou|utilizou|consultou|usadas|utilizadas|consultadas)\b|"
     r"\bde\s+onde\s+(?:voce\s+)?(?:tirou|obteve|conseguiu)\b|"
@@ -1347,6 +1350,17 @@ def _web_grounded_input(
         if requested_kind
         else ""
     )
+    direct_answer_instruction = (
+        "\n<answer_quality>\n"
+        "Responda diretamente ao pedido. Quando os resultados permitem uma "
+        "recomendação ou síntese razoável, entregue-a usando as evidências "
+        "encontradas. Não transforme a incerteza normal de rankings, tendências "
+        "ou dados de mercado em recusa, nem diga que não pode responder só "
+        "porque não existe certeza absoluta. Mencione a data da evidência de "
+        "forma breve apenas quando ela alterar materialmente a conclusão. Não "
+        "invente a data atual nem especule sobre uma mudança que os resultados "
+        "não mostram.\n</answer_quality>"
+    )
     return (
         input_text
         + "\n\n<web_search_results>\n"
@@ -1369,6 +1383,7 @@ def _web_grounded_input(
         + sensitive_instruction
         + scope_instruction
         + item_kind_instruction
+        + direct_answer_instruction
         + _evidence_prompt_instruction(
             safe_source_count=safe_source_count,
             sensitive_query=sensitive_query,
