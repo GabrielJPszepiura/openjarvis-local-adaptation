@@ -36,6 +36,9 @@ dependencies = [
     "openai>=1.30",
     "nvidia-ml-py>=12.560.30",
     "posthog>=3.0",
+    "python-docx>=1.1",
+    "openpyxl>=3.1",
+    "reportlab>=4.0",
     # Process identity and descendant cleanup for the source-checkout GUI.
     "psutil>=5.9",
     "python-telegram-bot>=22.8",

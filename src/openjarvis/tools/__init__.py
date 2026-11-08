@@ -108,6 +108,11 @@ except ImportError:
     pass
 
 try:
+    import openjarvis.tools.document_create  # noqa: F401
+except ImportError:
+    pass
+
+try:
     import openjarvis.tools.apply_patch  # noqa: F401
 except ImportError:
     pass

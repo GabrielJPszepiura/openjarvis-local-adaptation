@@ -194,7 +194,12 @@ class MCPServer:
 
         for cls in _tool_classes:
             try:
-                if getattr(cls, "tool_id", None) in {"file_read", "file_write"}:
+                if getattr(cls, "tool_id", None) in {
+                    "file_read",
+                    "file_write",
+                    "create_document",
+                    "create_spreadsheet",
+                }:
                     tools.append(cls(allowed_dirs=allowed_dirs))
                 else:
                     tools.append(cls())
@@ -211,7 +216,13 @@ class MCPServer:
                     try:
                         kwargs = (
                             {"allowed_dirs": allowed_dirs}
-                            if key in {"file_read", "file_write"}
+                            if key
+                            in {
+                                "file_read",
+                                "file_write",
+                                "create_document",
+                                "create_spreadsheet",
+                            }
                             else {}
                         )
                         tool = ToolRegistry.create(key, **kwargs)

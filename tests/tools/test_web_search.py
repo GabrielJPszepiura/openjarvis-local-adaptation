@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import sys
-from unittest.mock import MagicMock, patch
+from datetime import datetime, timezone
+from unittest.mock import MagicMock, call, patch
 
 import pytest
 
 from openjarvis.core.registry import ToolRegistry
+from openjarvis.core.types import ToolResult
 from openjarvis.tools.web_search import WebSearchTool
 
 
@@ -32,6 +34,152 @@ def _no_ambient_firecrawl_key(monkeypatch):
 
 
 class TestWebSearchTool:
+    def test_quality_filter_deduplicates_tracking_variants_and_prefers_official(self):
+        result = ToolResult(
+            tool_name="web_search",
+            content=(
+                "### Guia comercial\n"
+                "Source: https://example.com/energia?utm_source=newsletter\n"
+                "Summary: Informações sobre energia solar no Brasil.\n\n---\n\n"
+                "### Página oficial\n"
+                "Source: https://www.gov.br/energia/solar\n"
+                "Summary: Informações oficiais sobre energia solar no Brasil.\n\n"
+                "---\n\n"
+                "### Guia comercial duplicado\n"
+                "Source: https://example.com/energia?utm_campaign=social\n"
+                "Summary: A mesma página de energia solar no Brasil."
+            ),
+            metadata={"engine": "test"},
+        )
+
+        filtered = WebSearchTool._quality_filter(
+            result, "energia solar no Brasil", 5
+        )
+
+        assert filtered.content.count("Source:") == 2
+        assert filtered.content.index("https://www.gov.br") < filtered.content.index(
+            "https://example.com"
+        )
+        assert filtered.metadata["quality"]["duplicates_removed"] == 1
+        assert filtered.metadata["sources"] == [
+            {"title": "Página oficial", "url": "https://www.gov.br/energia/solar"},
+            {
+                "title": "Guia comercial",
+                "url": "https://example.com/energia?utm_source=newsletter",
+            },
+        ]
+
+    def test_quality_filter_prioritizes_recent_results_when_requested(self):
+        current = datetime.now(timezone.utc).date().isoformat()
+        result = ToolResult(
+            tool_name="web_search",
+            content=(
+                "### Comunicado oficial antigo\n"
+                "Source: https://www.gov.br/noticias\n"
+                "Summary: Dados sobre intercâmbio publicados em 2022-01-15.\n\n"
+                "---\n\n"
+                "### Atualização recente\n"
+                "Source: https://news.example.com/intercambio\n"
+                f"Summary: Dados sobre intercâmbio publicados em {current}."
+            ),
+        )
+
+        filtered = WebSearchTool._quality_filter(
+            result, "notícias atuais sobre intercâmbio", 5
+        )
+
+        assert filtered.content.startswith("### Atualização recente")
+
+    def test_quality_filter_excludes_wikipedia_and_prefers_recent_by_default(self):
+        current = datetime.now(timezone.utc).date().isoformat()
+        result = ToolResult(
+            tool_name="web_search",
+            content=(
+                "### Wikipedia\n"
+                "Source: https://en.wikipedia.org/wiki/Student_visa\n"
+                "Summary: Encyclopedic summary.\n\n---\n\n"
+                "### Official old guidance\n"
+                "Source: https://www.gov.example/visa\n"
+                "Summary: Published 2021-01-15.\n\n---\n\n"
+                "### Recent secondary report\n"
+                "Source: https://news.example.com/visa\n"
+                f"Summary: Published {current}."
+            ),
+        )
+
+        filtered = WebSearchTool._quality_filter(result, "student visa", 5)
+
+        assert "wikipedia.org" not in filtered.content
+        assert filtered.content.startswith("### Recent secondary report")
+        assert filtered.metadata["quality"]["wikipedia_removed"] == 1
+        assert filtered.metadata["quality"]["recent_preferred"] is True
+
+    def test_quality_filter_prefers_current_then_previous_year(self):
+        current_year = datetime.now(timezone.utc).year
+        result = ToolResult(
+            tool_name="web_search",
+            content=(
+                "### Guidance from two years ago\n"
+                "Source: https://example.com/old\n"
+                f"Summary: Rules from {current_year - 2}.\n\n---\n\n"
+                "### Last year's guidance\n"
+                "Source: https://example.com/previous\n"
+                f"Summary: Rules from {current_year - 1}.\n\n---\n\n"
+                "### Current guidance\n"
+                "Source: https://example.com/current\n"
+                f"Summary: Rules from {current_year}."
+            ),
+        )
+
+        filtered = WebSearchTool._quality_filter(result, "student visa", 5)
+
+        assert filtered.content.index("Current guidance") < filtered.content.index(
+            "Last year's guidance"
+        )
+        assert filtered.content.index("Last year's guidance") < filtered.content.index(
+            "two years ago"
+        )
+
+    def test_execute_falls_back_after_insufficient_official_results(self, monkeypatch):
+        tool = WebSearchTool(engine="youcom")
+        primary = ToolResult(
+            tool_name="web_search",
+            content=(
+                "### Secondary\n"
+                "Source: https://example.com/article\n"
+                "Summary: General information."
+            ),
+            metadata={"engine": "youcom"},
+        )
+        fallback = ToolResult(
+            tool_name="web_search",
+            content=(
+                "### Official\n"
+                "Source: https://agency.gov/guidance\n"
+                "Summary: Official guidance."
+            ),
+            metadata={"engine": "youcom"},
+        )
+        run_search = MagicMock(side_effect=[primary, fallback])
+        monkeypatch.setattr(tool, "_run_search", run_search)
+
+        result = tool.execute(query="student visa requirements")
+
+        assert run_search.call_count == 2
+        assert "fonte oficial" in run_search.call_args_list[0].args[1]
+        assert run_search.call_args_list[1].args[1] == "student visa requirements"
+        assert result.metadata["search_strategy"] == "official_first_then_fallback"
+        assert result.metadata["quality"]["trusted_results"] == 1
+
+    def test_quality_filter_keeps_unrecognised_provider_response_intact(self):
+        result = ToolResult(
+            tool_name="web_search",
+            content="A provider returned a response without result blocks.",
+        )
+
+        filtered = WebSearchTool._quality_filter(result, "test", 5)
+        assert filtered.content == result.content
+
     def test_spec_name_and_category(self):
         tool = WebSearchTool(api_key="test-key")
         assert tool.spec.name == "web_search"
@@ -220,8 +368,27 @@ class TestWebSearchTool:
 
         tool = WebSearchTool(api_key="test-key", max_results=3)
         tool.execute(query="test", max_results=7)
-        mock_client.search.assert_called_once_with(
-            "test", max_results=7, search_depth="advanced", include_usage=True
+        assert mock_client.search.call_count == 2
+        current_year = datetime.now(timezone.utc).year
+        primary_query = (
+            "test fonte oficial governo instituição confiável informações recentes "
+            f"{current_year}"
+        )
+        mock_client.search.assert_has_calls(
+            [
+                call(
+                    primary_query,
+                    max_results=7,
+                    search_depth="advanced",
+                    include_usage=True,
+                ),
+                call(
+                    "test",
+                    max_results=7,
+                    search_depth="advanced",
+                    include_usage=True,
+                ),
+            ]
         )
 
     def test_to_openai_function(self):
@@ -1559,7 +1726,7 @@ class TestFirecrawlCredentialSafety:
                 result = tool.execute(query=query)
 
         assert result.success is True
-        assert len(requests) == 1
+        assert len(requests) == (2 if mode == "search" else 1)
         request = requests[0]
         endpoint = f"https://example.test/firecrawl/v2/{mode}"
         assert str(request.url) == endpoint

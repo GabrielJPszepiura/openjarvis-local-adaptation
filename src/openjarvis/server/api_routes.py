@@ -417,10 +417,29 @@ def _serialise_trace(trace) -> dict:
     )
     dur = d.pop("total_latency_seconds", 0.0)
     d["duration_ms"] = round(dur * 1000)
-    for step in d.get("steps", []):
+    for step in d.get("steps", []) or []:
         st = step.get("step_type")
         if hasattr(st, "value"):
             step["step_type"] = st.value
+
+        # TraceStep is stored in the core model as duration_seconds plus
+        # separate input/output/metadata dictionaries.  The dashboard uses a
+        # compact frontend contract with duration_ms and one expandable data
+        # object.  Translate that contract here so the UI does not have to
+        # guess which backend representation it received.
+        seconds = step.pop("duration_seconds", 0.0)
+        try:
+            seconds = max(0.0, float(seconds or 0.0))
+        except (TypeError, ValueError):
+            seconds = 0.0
+        step["duration_ms"] = round(seconds * 1000)
+
+        details = {}
+        for label in ("input", "output", "metadata"):
+            value = step.pop(label, None)
+            if value:
+                details[label] = value
+        step["data"] = details
     return d
 
 

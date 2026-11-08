@@ -262,7 +262,7 @@ class AgentExecutor:
                         "type": "tool_call",
                         "input": {
                             "tool": event.data.get("tool"),
-                            "args": event.data.get("args"),
+                            "arguments": event.data.get("arguments", {}),
                         },
                         "start_time": event.timestamp,
                     }
@@ -273,9 +273,10 @@ class AgentExecutor:
                 for step in reversed(trace_steps):
                     if step["type"] == "tool_call" and "output" not in step:
                         step["output"] = {
+                            "success": event.data.get("success", False),
                             "result": str(event.data.get("result", ""))[:4096],
                         }
-                        step["duration"] = event.data.get("duration", 0)
+                        step["duration"] = event.data.get("latency", 0)
                         break
 
         if self._trace_store:

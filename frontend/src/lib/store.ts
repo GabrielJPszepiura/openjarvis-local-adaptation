@@ -2,6 +2,7 @@ import { create } from 'zustand';
 import type {
   Conversation,
   ChatMessage,
+  GeneratedFile,
   LiveEnergyMetrics,
   LogEntry,
   ModelInfo,
@@ -41,6 +42,9 @@ const OPTIN_NAME_KEY = 'openjarvis-display-name';
 const OPTIN_EMAIL_KEY = 'openjarvis-email';
 const OPTIN_ANONID_KEY = 'openjarvis-anon-id';
 const OPTIN_SEEN_KEY = 'openjarvis-optin-seen';
+const LOGS_KEY = 'openjarvis-logs';
+const MAX_LOG_ENTRIES = 500;
+const DEFAULT_MODEL = 'qwen3.5:2b';
 
 interface ConversationStore {
   version: 1;
@@ -92,9 +96,21 @@ function saveConversations(store: ConversationStore): void {
 }
 
 export type ThemeMode = 'light' | 'dark' | 'system';
+export type AppLanguage = 'en-US' | 'pt-BR';
+
+function getInitialLanguage(): AppLanguage {
+  try {
+    const saved = localStorage.getItem('openjarvis-language');
+    if (saved === 'en-US' || saved === 'pt-BR') return saved;
+    return navigator.language.toLowerCase().startsWith('pt') ? 'pt-BR' : 'en-US';
+  } catch {
+    return 'en-US';
+  }
+}
 
 interface Settings {
   theme: ThemeMode;
+  language: AppLanguage;
   apiUrl: string;
   // Local server API key (OPENJARVIS_API_KEY). Sent as a Bearer token on
   // /v1 + /api requests so a key-protected `jarvis serve` doesn't 401 the
@@ -113,10 +129,11 @@ interface Settings {
 function loadSettings(): Settings {
   const defaults: Settings = {
     theme: 'system',
+    language: getInitialLanguage(),
     apiUrl: '',
     apiKey: '',
     fontSize: 'default',
-    defaultModel: '',
+    defaultModel: DEFAULT_MODEL,
     defaultAgent: '',
     temperature: 0.7,
     maxTokens: 4096,
@@ -127,7 +144,14 @@ function loadSettings(): Settings {
   try {
     const raw = localStorage.getItem(SETTINGS_KEY);
     if (!raw) return defaults;
-    return { ...defaults, ...JSON.parse(raw) };
+    const saved = JSON.parse(raw) as Partial<Settings>;
+    return {
+      ...defaults,
+      ...saved,
+      // Migrate older settings, which persisted an empty default and caused
+      // the first Ollama model (often Gemma) to be selected on every launch.
+      defaultModel: saved.defaultModel || DEFAULT_MODEL,
+    };
   } catch {
     return defaults;
   }
@@ -137,12 +161,41 @@ function saveSettings(settings: Settings): void {
   localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings));
 }
 
+function loadLogs(): LogEntry[] {
+  try {
+    const raw = localStorage.getItem(LOGS_KEY);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return [];
+    return parsed
+      .filter((entry): entry is LogEntry =>
+        entry !== null
+        && typeof entry === 'object'
+        && typeof entry.timestamp === 'number'
+        && ['info', 'warn', 'error'].includes(entry.level)
+        && ['server', 'model', 'chat', 'tool'].includes(entry.category)
+        && typeof entry.message === 'string')
+      .slice(-MAX_LOG_ENTRIES);
+  } catch {
+    return [];
+  }
+}
+
+function saveLogs(entries: LogEntry[]): void {
+  try {
+    localStorage.setItem(LOGS_KEY, JSON.stringify(entries.slice(-MAX_LOG_ENTRIES)));
+  } catch {
+    // Logging must never interrupt chat when storage is unavailable or full.
+  }
+}
+
 // ── Store ─────────────────────────────────────────────────────────────
 
 const INITIAL_STREAM: StreamState = {
   conversationId: null,
   isStreaming: false,
   phase: '',
+  effectiveModel: '',
   elapsedMs: 0,
   activeToolCalls: [],
   content: '',
@@ -199,6 +252,7 @@ interface AppState {
     audio?: { url: string },
     researchTraces?: ResearchSearchTrace[],
     researchSources?: ResearchSource[],
+    generatedFiles?: GeneratedFile[],
   ) => void;
   setStreamState: (state: Partial<StreamState>) => void;
   resetStream: () => void;
@@ -446,6 +500,7 @@ export const useAppStore = create<AppState>((set, get) => {
       audio?: { url: string },
       researchTraces?: ResearchSearchTrace[],
       researchSources?: ResearchSource[],
+      generatedFiles?: GeneratedFile[],
     ) => {
       const store = loadConversations();
       const conv = store.conversations[conversationId];
@@ -459,6 +514,7 @@ export const useAppStore = create<AppState>((set, get) => {
         if (audio) lastMsg.audio = audio;
         if (researchTraces) lastMsg.researchTraces = researchTraces;
         if (researchSources) lastMsg.researchSources = researchSources;
+        if (generatedFiles) lastMsg.generatedFiles = generatedFiles;
         conv.updatedAt = Date.now();
         saveConversations(store);
         if (get().activeId === conversationId) {
@@ -573,11 +629,20 @@ export const useAppStore = create<AppState>((set, get) => {
     clearAgentEvents: () => set({ agentEvents: [] }),
 
     // ── Logs ────────────────────────────────────────────────────────
-    logEntries: [],
-    addLogEntry: (entry) => set((s) => ({
-      logEntries: [...s.logEntries.slice(-499), entry],
-    })),
-    clearLogs: () => set({ logEntries: [] }),
+    logEntries: loadLogs(),
+    addLogEntry: (entry) => set((s) => {
+      const logEntries = [...s.logEntries.slice(-(MAX_LOG_ENTRIES - 1)), entry];
+      saveLogs(logEntries);
+      return { logEntries };
+    }),
+    clearLogs: () => {
+      try {
+        localStorage.removeItem(LOGS_KEY);
+      } catch {
+        // Keep the in-memory clear usable even with read-only storage.
+      }
+      set({ logEntries: [] });
+    },
 
     // ── Model loading ───────────────────────────────────────────────
     modelLoading: false,

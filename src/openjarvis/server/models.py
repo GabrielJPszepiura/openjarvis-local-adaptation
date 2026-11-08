@@ -45,11 +45,19 @@ class AudioMeta(BaseModel):
     url: str
 
 
+class GeneratedFileMeta(BaseModel):
+    filename: str
+    format: str
+    size_bytes: int = 0
+    download_url: str
+
+
 class ChoiceMessage(BaseModel):
     role: str = "assistant"
     content: Optional[str] = ""
     tool_calls: Optional[List[Dict[str, Any]]] = None
     audio: Optional[AudioMeta] = None
+    generated_files: List[GeneratedFileMeta] = Field(default_factory=list)
 
 
 class Choice(BaseModel):
@@ -127,6 +135,7 @@ __all__ = [
     "ChoiceMessage",
     "ComplexityInfo",
     "DeltaMessage",
+    "GeneratedFileMeta",
     "ModelListResponse",
     "ModelObject",
     "StreamChoice",

@@ -610,6 +610,48 @@ class TestChatCompletions:
                     content += delta_content
         assert content == "Hello world"
 
+    def test_agent_stream_forwards_live_operational_events(self):
+        import asyncio
+
+        from openjarvis.server.models import ChatCompletionRequest, ChatMessage
+        from openjarvis.server.routes import _handle_agent_stream
+
+        bus = EventBus()
+        agent = _make_agent()
+        agent._tools = [object()]
+        agent._model = "test-model"
+
+        def run_with_status(*_args, **_kwargs):
+            bus.publish(
+                EventType.AGENT_STATUS,
+                {"stage": "routing", "message": "Entendendo..."},
+            )
+            return _make_agent("done").run.return_value
+
+        agent.run.side_effect = run_with_status
+        request = ChatCompletionRequest(
+            model="test-model",
+            messages=[ChatMessage(role="user", content="Olá")],
+            stream=True,
+        )
+
+        async def collect_stream() -> str:
+            response = await _handle_agent_stream(
+                agent,
+                "test-model",
+                request,
+                bus=bus,
+            )
+            chunks = [chunk async for chunk in response.body_iterator]
+            return "".join(
+                chunk.decode() if isinstance(chunk, bytes) else chunk
+                for chunk in chunks
+            )
+
+        body = asyncio.run(collect_stream())
+        assert "event: agent_status" in body
+        assert '"stage": "routing"' in body
+
     def test_multi_engine_local_fallback_reports_actual_ollama_route(self):
         """Finish telemetry follows the backend that produced the tokens."""
         from openjarvis.engine.multi import MultiEngine

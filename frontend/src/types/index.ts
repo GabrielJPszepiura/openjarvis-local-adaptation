@@ -115,6 +115,22 @@ export interface LiveEnergyMetrics {
   duration_s: number;
 }
 
+export interface ChatAttachment {
+  name: string;
+  size: number;
+  type: string;
+  text: string;
+  characters: number;
+  truncated?: boolean;
+}
+
+export interface GeneratedFile {
+  filename: string;
+  format: string;
+  size_bytes: number;
+  download_url: string;
+}
+
 export interface ChatMessage {
   id: string;
   role: 'user' | 'assistant';
@@ -127,6 +143,8 @@ export interface ChatMessage {
   usage?: TokenUsage;
   telemetry?: MessageTelemetry;
   audio?: { url: string };
+  attachments?: ChatAttachment[];
+  generatedFiles?: GeneratedFile[];
 }
 
 export interface Conversation {
@@ -150,6 +168,7 @@ export interface StreamState {
   conversationId: string | null;
   isStreaming: boolean;
   phase: string;
+  effectiveModel: string;
   elapsedMs: number;
   activeToolCalls: ToolCallInfo[];
   content: string;

@@ -306,7 +306,15 @@ def serve(
 
     # Resolve agent
     agent = None
-    agent_key = agent_name or config.server.agent
+    # ``[agent].default_agent`` is the user-facing default configured by
+    # ``jarvis init`` / ``jarvis config``. Previously the server only looked
+    # at ``[server].agent`` here, so ``jarvis gui`` could start a healthy chat
+    # backend with no agent and therefore no document-creation tools.
+    agent_key = (
+        agent_name
+        or config.server.agent
+        or config.agent.default_agent
+    )
     # Tool instances resolved for the primary agent are reused below to build
     # the scheduler's ToolExecutor — avoiding a second full SystemBuilder.build()
     # (which would re-discover the engine, re-resolve tools, re-open the channel,

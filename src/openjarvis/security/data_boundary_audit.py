@@ -260,6 +260,8 @@ LOCAL_ACCESS_TOOLS = {
     "docker_shell_exec",
     "file_read",
     "file_write",
+    "create_document",
+    "create_spreadsheet",
     "get_pending_actions",
     "git_commit",
     "git_diff",

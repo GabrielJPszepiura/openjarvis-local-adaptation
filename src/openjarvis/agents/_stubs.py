@@ -41,6 +41,19 @@ class AgentResult:
     metadata: Dict[str, Any] = field(default_factory=dict)
 
 
+@dataclass(slots=True)
+class _ContinuationOutcome:
+    """Internal result for bounded continuation of a model response."""
+
+    content: str
+    finish_reason: str
+    continuations: int = 0
+    truncated: bool = False
+    prompt_tokens: int = 0
+    completion_tokens: int = 0
+    stop_reason: str = "complete"
+
+
 class BaseAgent(ABC):
     """Base class for all agent implementations.
 
@@ -269,7 +282,17 @@ class BaseAgent(ABC):
         Publishes INFERENCE_START/END events on the bus when the engine
         does not publish its own (i.e. non-instrumented engines).
         """
-        if self._bus and not getattr(self._engine, "_publishes_events", False):
+        publishes_events = bool(getattr(self._engine, "_publishes_events", False))
+        resolver = getattr(self._engine, "publishes_events_for", None)
+        if not publishes_events and callable(resolver):
+            try:
+                publishes_events = bool(resolver(self._model))
+            except Exception:
+                # Capability discovery must never block inference. If the
+                # route cannot be resolved, retain the safe fallback events.
+                publishes_events = False
+
+        if self._bus and not publishes_events:
             engine_id = getattr(self._engine, "engine_id", "")
             self._bus.publish(
                 EventType.INFERENCE_START,
@@ -281,6 +304,11 @@ class BaseAgent(ABC):
         # implementation itself (for example ``tools`` or ``response_format``)
         # and must reach the engine adapter unchanged. Filtering the merged
         # mapping silently stripped function-calling tools from every agent.
+        max_tokens_override = extra_kwargs.pop("_max_tokens_override", None)
+        effective_max_tokens = self._max_tokens
+        if isinstance(max_tokens_override, int) and max_tokens_override > 0:
+            effective_max_tokens = max_tokens_override
+
         gen_kwargs = {
             key: value
             for key, value in self._engine_options.items()
@@ -291,11 +319,17 @@ class BaseAgent(ABC):
             messages,
             model=self._model,
             temperature=self._temperature,
-            max_tokens=self._max_tokens,
+            max_tokens=effective_max_tokens,
             **gen_kwargs,
         )
+        # Keep the effective budget next to the response.  Some local engine
+        # adapters (notably older Ollama versions) report ``stop`` even when
+        # generation consumed the entire token budget.  Continuation logic
+        # needs this value to distinguish a genuinely complete response from
+        # a silently truncated one.
+        result["_requested_max_tokens"] = effective_max_tokens
 
-        if self._bus and not getattr(self._engine, "_publishes_events", False):
+        if self._bus and not publishes_events:
             usage = result.get("usage", {})
             self._bus.publish(
                 EventType.INFERENCE_END,
@@ -342,28 +376,158 @@ class BaseAgent(ABC):
         Returns the concatenated content after up to *max_continuations*
         follow-up generate calls.
         """
-        content = result.get("content", "")
-        finish_reason = result.get("finish_reason", "")
+        return self._continue_generation(
+            result,
+            messages,
+            max_continuations=max_continuations,
+        ).content
 
-        for _ in range(max_continuations):
-            if finish_reason != "length":
+    def _continue_generation(
+        self,
+        result: dict,
+        messages: list[Message],
+        *,
+        max_continuations: int = 2,
+        max_tokens_override: Optional[int] = None,
+        max_total_chars: Optional[int] = None,
+    ) -> _ContinuationOutcome:
+        """Continue a length-limited response with strict progress guards.
+
+        Each generated segment is appended to the conversation exactly once.
+        Empty or repeated continuations stop immediately, and exhausting the
+        continuation allowance is reported as truncation instead of being
+        silently treated as a complete answer.
+        """
+        content = str(result.get("content", "") or "")
+        last_segment = content
+        finish_reason = self._effective_finish_reason(result)
+        continuation_count = 0
+        prompt_tokens = 0
+        completion_tokens = 0
+        stop_reason = "complete"
+
+        while finish_reason == "length":
+            if continuation_count >= max(0, max_continuations):
+                stop_reason = "continuation_limit"
                 break
-            # Append what we have so far and ask the model to continue
-            from openjarvis.core.types import Message, Role
+            if max_total_chars is not None and len(content) >= max_total_chars:
+                stop_reason = "character_limit"
+                break
 
-            messages.append(Message(role=Role.ASSISTANT, content=content))
+            messages.append(Message(role=Role.ASSISTANT, content=last_segment))
             messages.append(
                 Message(
                     role=Role.USER,
-                    content="Continue from where you left off.",
+                    content=self._continuation_instruction(last_segment),
                 ),
             )
-            cont = self._generate(messages)
-            continuation = cont.get("content", "")
-            content += continuation
-            finish_reason = cont.get("finish_reason", "")
+            cont = self._generate(
+                messages,
+                _max_tokens_override=max_tokens_override,
+            )
+            continuation_count += 1
+            usage = cont.get("usage", {}) or {}
+            prompt_tokens += int(usage.get("prompt_tokens", 0) or 0)
+            completion_tokens += int(usage.get("completion_tokens", 0) or 0)
+            continuation = str(cont.get("content", "") or "")
+            finish_reason = self._effective_finish_reason(cont)
 
-        return content
+            normalized = " ".join(continuation.split())
+            previous_normalized = " ".join(last_segment.split())
+            if not normalized:
+                stop_reason = "empty_continuation"
+                finish_reason = "length"
+                break
+            if normalized == previous_normalized:
+                stop_reason = "repeated_continuation"
+                finish_reason = "length"
+                break
+
+            content = self._join_continuation_segments(content, continuation)
+            last_segment = continuation
+            if max_total_chars is not None and len(content) > max_total_chars:
+                stop_reason = "character_limit"
+                finish_reason = "length"
+                break
+
+        truncated = finish_reason == "length"
+        return _ContinuationOutcome(
+            content=content,
+            finish_reason=finish_reason,
+            continuations=continuation_count,
+            truncated=truncated,
+            prompt_tokens=prompt_tokens,
+            completion_tokens=completion_tokens,
+            stop_reason=stop_reason,
+        )
+
+    @staticmethod
+    def _continuation_instruction(last_segment: str) -> str:
+        """Build a continuation prompt that preserves sentence boundaries.
+
+        Local models sometimes start the next requested section immediately
+        even when the previous generation ended halfway through a sentence.
+        Showing the short tail makes that boundary explicit without resending
+        the whole document.
+        """
+        tail = last_segment.rstrip()[-400:]
+        ends_complete_sentence = bool(
+            re.search(r"[.!?…][\"'”’)]?\s*$", tail)
+        )
+        boundary_instruction = (
+            "O trecho anterior pode ter terminado no meio de uma frase. "
+            "Primeiro conclua essa frase ou parágrafo de forma natural; "
+            if tail and not ends_complete_sentence
+            else "Continue a partir do próximo parágrafo ou seção; "
+        )
+        return (
+            "A resposta anterior foi interrompida pelo limite de geração. "
+            f"{boundary_instruction}"
+            "depois complete somente as seções restantes, sem repetir o "
+            "conteúdo já produzido. Preserve a estrutura Markdown e sempre "
+            "deixe uma linha em branco antes de um novo título iniciado por #. "
+            "Retorne apenas a continuação do documento.\n\n"
+            f"Final do trecho anterior:\n---\n{tail}\n---"
+        )
+
+    @staticmethod
+    def _join_continuation_segments(previous: str, continuation: str) -> str:
+        """Join generated segments without gluing headings to paragraphs."""
+        if not previous:
+            return continuation
+        if not continuation:
+            return previous
+
+        continuation_without_indent = continuation.lstrip()
+        starts_with_heading = bool(
+            re.match(r"#{1,6}\s+\S", continuation_without_indent)
+        )
+        if starts_with_heading:
+            return previous.rstrip() + "\n\n" + continuation_without_indent
+
+        return previous + continuation
+
+    @staticmethod
+    def _effective_finish_reason(result: dict) -> str:
+        """Return a trustworthy completion reason for local engines.
+
+        Ollama releases that do not expose ``done_reason`` can label a
+        response as ``stop`` after producing exactly ``num_predict`` tokens.
+        Treat exact budget saturation as ``length`` so bounded continuation
+        runs and incomplete artifacts are never presented as finished.
+        """
+        finish_reason = str(result.get("finish_reason", "") or "")
+        requested = result.get("_requested_max_tokens")
+        usage = result.get("usage", {}) or {}
+        completion_tokens = usage.get("completion_tokens", 0)
+        if (
+            isinstance(requested, int)
+            and requested > 0
+            and isinstance(completion_tokens, (int, float))
+            and completion_tokens >= requested
+        ):
+            return "length"
+        return finish_reason
 
     @staticmethod
     def _strip_think_tags(text: str) -> str:

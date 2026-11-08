@@ -355,7 +355,12 @@ def _build_tools(
             tools.append(tool_cls(channel=channel))
         elif name == "llm":
             tools.append(tool_cls(engine=engine, model=model_name))
-        elif name in {"file_read", "file_write"}:
+        elif name in {
+            "file_read",
+            "file_write",
+            "create_document",
+            "create_spreadsheet",
+        }:
             from openjarvis.tools._paths import file_tool_kwargs
 
             tools.append(tool_cls(**file_tool_kwargs(name, config)))

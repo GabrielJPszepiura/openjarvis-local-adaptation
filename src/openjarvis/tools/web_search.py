@@ -23,14 +23,17 @@ from __future__ import annotations
 
 import logging
 import os
+import re
+from datetime import datetime, timezone
 from typing import Any
-from urllib.parse import urljoin
+from urllib.parse import parse_qsl, urlencode, urljoin, urlsplit, urlunsplit
 
 from openjarvis import __version__
 from openjarvis.core.registry import ToolRegistry
 from openjarvis.core.types import ToolResult
 from openjarvis.security.ssrf import check_ssrf
 from openjarvis.tools._stubs import BaseTool, ToolSpec
+from openjarvis.tools.source_evaluation import evaluate_source, is_sensitive_query
 
 logger = logging.getLogger(__name__)
 
@@ -62,6 +65,7 @@ FIRECRAWL_SCRAPE_TIMEOUT_MS = 45000
 # Search descriptions can run to several thousand characters of page text, so
 # each one is cut to a snippet that a small local model can take five of.
 FIRECRAWL_SNIPPET_CHARS = 500
+SEARCH_TIMEOUT_SECONDS = 10.0
 FIRECRAWL_KEYS_URL = (
     "https://www.firecrawl.dev/app/api-keys"
     "?utm_source=openjarvis&utm_medium=integration"
@@ -90,6 +94,61 @@ YOUCOM_PLATFORM_URL = (
 _KEY_UPGRADE_HINT = (
     f"You.com keyless free-tier limit reached. Set {YOUCOM_API_KEY_ENV} for "
     f"higher limits — a free key is available at {YOUCOM_PLATFORM_URL}"
+)
+
+# Parameters that identify a marketing campaign rather than a different page.
+# Removing them lets the quality pass identify the same result returned by two
+# search providers (or twice by one provider) without changing ordinary URLs.
+_TRACKING_QUERY_KEYS = frozenset({"fbclid", "gclid", "ref", "ref_"})
+_STOP_WORDS = frozenset(
+    {
+        "a", "as", "ao", "aos", "com", "como", "da", "das", "de", "do",
+        "dos", "e", "em", "na", "nas", "no", "nos", "o", "os", "para",
+        "por", "que", "sobre", "the", "and", "for", "from", "how", "in",
+        "is", "of", "to", "what", "with",
+    }
+)
+_FRESHNESS_WORDS = frozenset(
+    {
+        "atual", "atuais", "atualizado", "atualizada", "atualizados",
+        "atualizadas", "hoje", "latest", "newest",
+        "recent", "recente", "recentes", "último", "última", "ultimos",
+        "últimos", "ultimas", "últimas",
+    }
+)
+_OFFICIAL_HOST_SUFFIXES = (
+    ".gov",
+    ".gov.br",
+    ".gov.uk",
+    ".gov.au",
+    ".gc.ca",
+    ".edu",
+    ".edu.br",
+    ".int",
+    ".europa.eu",
+    ".un.org",
+)
+_TRUSTED_INSTITUTION_HOSTS = frozenset(
+    {
+        "canada.ca",
+        "who.int",
+        "oecd.org",
+        "worldbank.org",
+    }
+)
+_HISTORICAL_QUERY_WORDS = frozenset(
+    {
+        "historico",
+        "historica",
+        "historicos",
+        "historicas",
+        "historia",
+        "passado",
+        "antigo",
+        "antiga",
+        "antigos",
+        "antigas",
+    }
 )
 
 
@@ -231,13 +290,230 @@ class WebSearchTool(BaseTool):
     @staticmethod
     def _normalize_url(url: str) -> str:
         """Convert known PDF URLs to their HTML equivalents."""
-        import re as _re
-
         # arxiv: /pdf/ID → /abs/ID (abstract page with full metadata)
-        m = _re.match(r"(https?://arxiv\.org)/pdf/(.+?)(?:\.pdf)?$", url)
+        m = re.match(r"(https?://arxiv\.org)/pdf/(.+?)(?:\.pdf)?$", url)
         if m:
             return f"{m.group(1)}/abs/{m.group(2)}"
         return url
+
+    @staticmethod
+    def _canonical_result_url(url: str) -> str:
+        """Return a stable identity for a search result URL.
+
+        Search providers commonly return the same article with different UTM
+        tags or a fragment.  Those do not make a new source and used to occupy
+        several of the five result slots available to a small local model.
+        """
+        try:
+            parts = urlsplit(url.strip())
+        except ValueError:
+            return url.strip().lower()
+        if not parts.scheme or not parts.netloc:
+            return url.strip().lower()
+        query = urlencode(
+            sorted(
+                (key, value)
+                for key, value in parse_qsl(parts.query, keep_blank_values=True)
+                if not key.lower().startswith("utm_")
+                and key.lower() not in _TRACKING_QUERY_KEYS
+            )
+        )
+        path = parts.path.rstrip("/") or "/"
+        return urlunsplit(
+            (parts.scheme.lower(), parts.netloc.lower(), path, query, "")
+        )
+
+    @staticmethod
+    def _query_terms(query: str) -> set[str]:
+        return {
+            term
+            for term in re.findall(r"[\wÀ-ÿ]{3,}", query.lower())
+            if term not in _STOP_WORDS
+        }
+
+    @staticmethod
+    def _is_wikipedia(url: str) -> bool:
+        host = (urlsplit(url).hostname or "").lower()
+        return host == "wikipedia.org" or host.endswith(".wikipedia.org")
+
+    @staticmethod
+    def _is_trusted_source(url: str) -> bool:
+        # Source profiles distinguish an institutional candidate from an
+        # unverified commercial page.  They intentionally do not claim that a
+        # government-looking domain is the authority for every possible topic.
+        return evaluate_source(url).institutional
+
+    @classmethod
+    def _is_historical_query(cls, query: str) -> bool:
+        terms = cls._query_terms(query)
+        if terms & _HISTORICAL_QUERY_WORDS:
+            return True
+        years = [int(year) for year in re.findall(r"\b(19\d{2}|20\d{2})\b", query)]
+        return bool(years and max(years) < datetime.now(timezone.utc).year - 1)
+
+    @classmethod
+    def _primary_search_query(cls, query: str) -> str:
+        """Request official evidence first, adding the current year when useful."""
+        if cls._is_historical_query(query):
+            return f"{query} fonte oficial ou primária"
+        current_year = datetime.now(timezone.utc).year
+        return (
+            f"{query} fonte oficial governo instituição confiável "
+            f"informações recentes {current_year}"
+        )
+
+    @classmethod
+    def _score_result(cls, query: str, title: str, url: str, summary: str) -> int:
+        """Score a result with conservative, explainable quality heuristics."""
+        terms = cls._query_terms(query)
+        searchable = f"{title} {summary}".lower()
+        score = sum(3 for term in terms if term in title.lower())
+        score += sum(1 for term in terms if term in searchable)
+
+        host = (urlsplit(url).hostname or "").lower()
+        if cls._is_trusted_source(url):
+            score += 12
+        elif host.endswith(".org"):
+            score += 2
+
+        # Recency only affects searches that call for it. A full date outranks
+        # a bare year because it is less likely to be an incidental mention in
+        # a snippet. These weights intentionally exceed the domain bonus for
+        # current-news requests: an old official source should not hide a
+        # relevant announcement published this week.
+        fresh_requested = bool(cls._query_terms(query) & _FRESHNESS_WORDS)
+        recent_preferred = fresh_requested or not cls._is_historical_query(query)
+        if recent_preferred:
+            today = datetime.now(timezone.utc).date()
+            dated_results = []
+            date_matches = re.findall(
+                r"\b(20\d{2})[-/](\d{1,2})[-/](\d{1,2})\b",
+                searchable,
+            )
+            for raw_date in date_matches:
+                try:
+                    dated_results.append(
+                        datetime(
+                            int(raw_date[0]), int(raw_date[1]), int(raw_date[2])
+                        ).date()
+                    )
+                except ValueError:
+                    continue
+            if dated_results:
+                age_days = (today - max(dated_results)).days
+                if age_days <= 31:
+                    score += 12
+                elif age_days <= 93:
+                    score += 8
+                elif age_days <= 366:
+                    score += 4
+                elif age_days > 366:
+                    score -= 8
+                return score
+
+            current_year = today.year
+            years = [int(y) for y in re.findall(r"\b20\d{2}\b", searchable)]
+            if current_year in years:
+                score += 10
+            elif current_year - 1 in years:
+                # Early in a new year, the latest verified guidance is often
+                # still from the previous calendar year.  Keep it useful, but
+                # rank it below material from the current year.
+                score += 6
+            elif years and max(years) == current_year - 2:
+                score -= 5
+            elif years and max(years) < current_year - 2:
+                score -= 10
+        return score
+
+    @classmethod
+    def _quality_filter(
+        cls, result: ToolResult, query: str, max_results: int
+    ) -> ToolResult:
+        """Deduplicate and rank standard provider result blocks.
+
+        Providers use a shared, deliberately simple text representation.  This
+        pass runs after any provider response, so it also protects the
+        DuckDuckGo fallback from duplicate and weak results without changing
+        provider credentials or network behavior.
+        """
+        if (
+            not result.success
+            or not result.content
+            or result.content == "No results found."
+        ):
+            return result
+
+        candidates: list[tuple[int, int, str, str, str, dict[str, object]]] = []
+        seen_urls: set[str] = set()
+        wikipedia_removed = 0
+        duplicates_removed = 0
+        blocks = result.content.split("\n\n---\n\n")
+        for index, block in enumerate(blocks):
+            match = re.fullmatch(
+                r"### (?P<title>.+)\nSource: (?P<url>[^\n]*)\n"
+                r"Summary: (?P<summary>[\s\S]*)",
+                block,
+            )
+            if not match:
+                # Do not risk corrupting a provider's unexpected response.
+                return result
+            title = match.group("title").strip()
+            url = match.group("url").strip()
+            summary = match.group("summary").strip()
+            if cls._is_wikipedia(url):
+                wikipedia_removed += 1
+                continue
+            canonical_url = cls._canonical_result_url(url)
+            if canonical_url in seen_urls:
+                duplicates_removed += 1
+                continue
+            seen_urls.add(canonical_url)
+            profile = evaluate_source(url)
+            candidates.append(
+                (
+                    cls._score_result(query, title, url, summary),
+                    index,
+                    title,
+                    url,
+                    summary,
+                    profile.to_dict(),
+                )
+            )
+
+        candidates.sort(key=lambda item: (-item[0], item[1]))
+        selected = candidates[: max(1, int(max_results))]
+        result.content = "\n\n---\n\n".join(
+            f"### {title}\nSource: {url}\nSummary: {summary}"
+            for _, _, title, url, summary, _ in selected
+        ) or "No results found."
+        result.metadata = dict(result.metadata)
+        result.metadata["quality"] = {
+            "input_results": len(blocks),
+            "unique_results": len(candidates),
+            "duplicates_removed": duplicates_removed,
+            "wikipedia_removed": wikipedia_removed,
+            "trusted_results": sum(
+                1 for _, _, _, _, _, profile in selected if profile["institutional"]
+            ),
+            "primary_candidates": sum(
+                1 for _, _, _, _, _, profile in selected if profile["primary_candidate"]
+            ),
+            "recent_preferred": not cls._is_historical_query(query),
+            "sensitive_query": is_sensitive_query(query),
+        }
+        result.metadata["num_results"] = len(selected)
+        result.metadata["sources"] = [
+            {"title": title, "url": url}
+            for _, _, title, url, _, _ in selected
+            if url
+        ]
+        result.metadata["source_profiles"] = [
+            {"title": title, "url": url, **profile}
+            for _, _, title, url, _, profile in selected
+            if url
+        ]
+        return result
 
     @staticmethod
     def _fetch_url(url: str, max_chars: int = 6000) -> str:
@@ -343,7 +619,7 @@ class WebSearchTool(BaseTool):
                 url,
                 params={"query": query, "count": max_results},
                 headers=headers,
-                timeout=30.0,
+                timeout=SEARCH_TIMEOUT_SECONDS,
             )
             response.raise_for_status()
             payload = response.json()
@@ -451,7 +727,7 @@ class WebSearchTool(BaseTool):
                 SERPLY_SEARCH_URL,
                 params={"q": query, "num": max_results},
                 headers=headers,
-                timeout=30.0,
+                timeout=SEARCH_TIMEOUT_SECONDS,
             )
             response.raise_for_status()
             payload = response.json()
@@ -539,7 +815,7 @@ class WebSearchTool(BaseTool):
                 },
                 headers=self._firecrawl_headers(),
                 auth=auth,
-                timeout=30.0,
+                timeout=SEARCH_TIMEOUT_SECONDS,
             )
             response.raise_for_status()
             payload = response.json()
@@ -715,20 +991,45 @@ class WebSearchTool(BaseTool):
                     success=False,
                 )
 
-        max_results = params.get("max_results", self._max_results)
+        max_results = int(params.get("max_results", self._max_results))
         engine = self._resolve_engine()
-
-        if engine == "duckduckgo":
-            return self._duckduckgo_result(query, max_results)
+        primary_query = self._primary_search_query(query)
 
         try:
-            if engine == "youcom":
-                return self._youcom_search(query, max_results)
-            if engine == "serply":
-                return self._serply_search(query, max_results)
-            if engine == "firecrawl":
-                return self._firecrawl_search(query, max_results)
-            return self._tavily_search(query, max_results)
+            primary_result = self._quality_filter(
+                self._run_search(engine, primary_query, max_results),
+                query,
+                max_results,
+            )
+            primary_result.metadata["search_strategy"] = "official_first"
+            primary_quality = primary_result.metadata.get("quality", {})
+            minimum_trusted = min(2, max_results)
+            if primary_quality.get("trusted_results", 0) >= minimum_trusted:
+                return primary_result
+
+            # A broad result set is only requested after the official-first
+            # pass proved insufficient. This keeps secondary sources as a
+            # bounded fallback instead of the default answer corpus.
+            fallback_result = self._run_search(engine, query, max_results)
+            primary_content = (
+                ""
+                if primary_result.content == "No results found."
+                else primary_result.content
+            )
+            fallback_content = fallback_result.content
+            combined = ToolResult(
+                tool_name="web_search",
+                content="\n\n---\n\n".join(
+                    part for part in (primary_content, fallback_content) if part
+                ) or "No results found.",
+                success=fallback_result.success or primary_result.success,
+                metadata={
+                    **fallback_result.metadata,
+                    "search_strategy": "official_first_then_fallback",
+                    "fallback_reason": "insufficient_trusted_sources",
+                },
+            )
+            return self._quality_filter(combined, query, max_results)
         except _WebSearchEngineError as exc:
             reason = str(exc)
         except Exception as exc:  # engine SDKs raise their own error types
@@ -742,9 +1043,25 @@ class WebSearchTool(BaseTool):
             engine,
             reason,
         )
-        return self._duckduckgo_result(
-            query, max_results, fallback_from=engine, reason=reason
+        return self._quality_filter(
+            self._duckduckgo_result(
+                query, max_results, fallback_from=engine, reason=reason
+            ),
+            query,
+            max_results,
         )
+
+    def _run_search(self, engine: str, query: str, max_results: int) -> ToolResult:
+        """Run one provider search; policy and fallback live in :meth:`execute`."""
+        if engine == "duckduckgo":
+            return self._duckduckgo_result(query, max_results)
+        if engine == "youcom":
+            return self._youcom_search(query, max_results)
+        if engine == "serply":
+            return self._serply_search(query, max_results)
+        if engine == "firecrawl":
+            return self._firecrawl_search(query, max_results)
+        return self._tavily_search(query, max_results)
 
     def _tavily_search(self, query: str, max_results: int) -> ToolResult:
         """Search via the Tavily API."""

@@ -1,4 +1,5 @@
 import { useEffect, useState, useCallback, useRef } from 'react';
+import { useTranslation } from 'react-i18next';
 import { motion } from 'motion/react';
 import { useAppStore } from '../lib/store';
 import {
@@ -143,7 +144,7 @@ function InlineConnectForm({
 // entries already use (InlineConnectForm, oauth start+poll).
 // ---------------------------------------------------------------------------
 
-function GenericConnectPanel({
+export function GenericConnectPanel({
   connectorId,
   displayName,
   authType,
@@ -316,7 +317,7 @@ function GenericConnectPanel({
 // Upload / Paste form
 // ---------------------------------------------------------------------------
 
-const ACCEPTED_EXTENSIONS = '.txt,.md,.pdf,.docx,.csv';
+const ACCEPTED_EXTENSIONS = '.txt,.md,.pdf,.docx,.csv,.xlsx';
 
 function UploadForm({ onDone }: { onDone?: () => void }) {
   const [tab, setTab] = useState<'paste' | 'upload'>('paste');
@@ -2293,6 +2294,7 @@ function MemorySection() {
 // ---------------------------------------------------------------------------
 
 export function DataSourcesPage() {
+  const { t } = useTranslation();
   const [agents, setAgents] = useState<ManagedAgent[]>([]);
   const [activeTab, setActiveTab] = useState<'sources' | 'messaging' | 'memory'>('sources');
   const [creatingAgent, setCreatingAgent] = useState(false);
@@ -2332,9 +2334,9 @@ export function DataSourcesPage() {
   }, [activeTab, firstAgent, creatingAgent, ensureAgent]);
 
   const tabs = [
-    { id: 'sources' as const, label: 'Data Sources', icon: Database },
-    { id: 'messaging' as const, label: 'Messaging Channels', icon: MessageSquare },
-    { id: 'memory' as const, label: 'Memory', icon: Brain },
+    { id: 'sources' as const, label: t('pages.dataSources'), icon: Database },
+    { id: 'messaging' as const, label: t('pages.messagingChannels'), icon: MessageSquare },
+    { id: 'memory' as const, label: t('pages.memory'), icon: Brain },
   ];
 
   return (
@@ -2342,10 +2344,10 @@ export function DataSourcesPage() {
       <div className="max-w-5xl mx-auto">
       <header className="mb-6">
         <h1 className="text-lg font-semibold" style={{ color: 'var(--color-text)' }}>
-          Data Sources, Channels &amp; Memory
+          {t('pages.dataSourcesTitle')}
         </h1>
         <p className="text-sm mt-2 max-w-2xl" style={{ color: 'var(--color-text-secondary)' }}>
-          Connect personal data so the assistant can search across everything, and set up messaging channels to chat from your phone.
+          {t('pages.dataSourcesDescription')}
         </p>
       </header>
 

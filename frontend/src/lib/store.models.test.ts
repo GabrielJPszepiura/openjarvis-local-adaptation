@@ -33,6 +33,25 @@ afterEach(() => {
 });
 
 describe('setModels', () => {
+  it('selects Qwen by default even when Gemma is returned first', async () => {
+    const { useAppStore } = await import('./store');
+
+    useAppStore.getState().setModels([
+      model('gemma3:1b'),
+      model('qwen3.5:2b'),
+    ]);
+
+    expect(useAppStore.getState().selectedModel).toBe('qwen3.5:2b');
+  });
+
+  it('falls back to the first chat model when Qwen is unavailable', async () => {
+    const { useAppStore } = await import('./store');
+
+    useAppStore.getState().setModels([model('gemma3:1b')]);
+
+    expect(useAppStore.getState().selectedModel).toBe('gemma3:1b');
+  });
+
   it('does not select an embedding-only model', async () => {
     const { useAppStore } = await import('./store');
 

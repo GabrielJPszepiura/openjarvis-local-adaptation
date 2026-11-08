@@ -1,4 +1,4 @@
-import type { ModelInfo, SavingsData, ServerInfo } from '../types';
+import type { ChatAttachment, GeneratedFile, ModelInfo, SavingsData, ServerInfo } from '../types';
 import { SUPABASE_ANON_KEY, SUPABASE_URL } from './supabase';
 import { serializeToolCallArguments } from './tool-call';
 
@@ -176,6 +176,35 @@ export async function resetInferenceSource(): Promise<void> {
 // ---------------------------------------------------------------------------
 // API functions
 // ---------------------------------------------------------------------------
+
+export async function extractChatAttachments(files: File[]): Promise<ChatAttachment[]> {
+  const formData = new FormData();
+  for (const file of files) formData.append('files', file);
+  const res = await apiFetch('/v1/connectors/upload/extract', {
+    method: 'POST',
+    body: formData,
+  });
+  if (!res.ok) {
+    const payload = await res.json().catch(() => ({ detail: res.statusText }));
+    throw new Error(payload.detail || `Could not read attachment: ${res.status}`);
+  }
+  const payload = await res.json() as { attachments?: ChatAttachment[] };
+  return payload.attachments ?? [];
+}
+
+export async function downloadGeneratedFile(file: GeneratedFile): Promise<void> {
+  const res = await apiFetch(file.download_url);
+  if (!res.ok) throw new Error(`Could not download file: ${res.status}`);
+  const blob = await res.blob();
+  const url = URL.createObjectURL(blob);
+  const anchor = document.createElement('a');
+  anchor.href = url;
+  anchor.download = file.filename;
+  document.body.appendChild(anchor);
+  anchor.click();
+  anchor.remove();
+  URL.revokeObjectURL(url);
+}
 
 export async function fetchModels(): Promise<ModelInfo[]> {
   if (isTauri()) {

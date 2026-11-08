@@ -128,6 +128,21 @@ class MultiEngine(InferenceEngine):
         self._refresh_map()
         return self._model_key_map.get(model)
 
+    def model_capabilities(self, model: str) -> list[str] | None:
+        """Delegate optional model capability discovery to the owning engine."""
+        engine = self._engine_for(model)
+        resolver = getattr(engine, "model_capabilities", None)
+        return resolver(model) if callable(resolver) else None
+
+    def publishes_events_for(self, model: str) -> bool:
+        """Return whether the engine selected for *model* emits inference events.
+
+        ``MultiEngine`` itself only routes calls.  Exposing the selected
+        engine's behavior prevents agents from publishing a second pair of
+        fallback inference events around an already instrumented engine.
+        """
+        return bool(getattr(self._engine_for(model), "_publishes_events", False))
+
     def health(self) -> bool:
         return any(engine.health() for _key, engine in self._engines)
 

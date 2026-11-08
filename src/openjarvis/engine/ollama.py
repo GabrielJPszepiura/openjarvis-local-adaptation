@@ -228,7 +228,11 @@ class OllamaEngine(AsyncHTTPEngineMixin, InferenceEngine):
                 "total_tokens": prompt_tokens + completion_tokens,
             },
             "model": data.get("model", model),
-            "finish_reason": "stop",
+            # Recent Ollama versions expose the actual reason in
+            # ``done_reason`` (for example ``stop`` or ``length``).  Older
+            # versions may omit it, so downstream also checks token-budget
+            # saturation before considering the response complete.
+            "finish_reason": data.get("done_reason") or "stop",
         }
         # Extract timing from Ollama response (nanoseconds → seconds)
         result["ttft"] = data.get("prompt_eval_duration", 0) / 1e9
@@ -537,6 +541,21 @@ class OllamaEngine(AsyncHTTPEngineMixin, InferenceEngine):
             return []
         data = resp.json()
         return [m["name"] for m in data.get("models", [])]
+
+    def model_capabilities(self, model: str) -> list[str] | None:
+        """Return Ollama-advertised capabilities, or None when unavailable."""
+        try:
+            resp = self._client.get("/api/tags", timeout=2.0)
+            resp.raise_for_status()
+            for item in resp.json().get("models", []):
+                if item.get("name") == model or item.get("model") == model:
+                    capabilities = item.get("capabilities")
+                    if isinstance(capabilities, list):
+                        return [str(value) for value in capabilities]
+                    return None
+        except Exception as exc:
+            logger.debug("Could not read capabilities for %s: %s", model, exc)
+        return None
 
     def health(self) -> bool:
         try:

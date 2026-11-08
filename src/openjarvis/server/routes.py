@@ -9,13 +9,18 @@ import uuid
 import weakref
 from dataclasses import replace
 from typing import Any
+from urllib.parse import quote
 
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import StreamingResponse
 
+from openjarvis.core.events import EventType
 from openjarvis.core.paths import get_config_dir
 from openjarvis.core.types import Message, Role, ToolCall
-from openjarvis.server.model_capabilities import is_embed_only_model
+from openjarvis.server.model_capabilities import (
+    is_embed_only_model,
+    requests_file_creation,
+)
 from openjarvis.server.models import (
     ChatCompletionChunk,
     ChatCompletionRequest,
@@ -24,6 +29,7 @@ from openjarvis.server.models import (
     ChoiceMessage,
     ComplexityInfo,
     DeltaMessage,
+    GeneratedFileMeta,
     ModelListResponse,
     ModelObject,
     StreamChoice,
@@ -161,6 +167,7 @@ async def chat_completions(request_body: ChatCompletionRequest, request: Request
     engine = request.app.state.engine
     agent = getattr(request.app.state, "agent", None)
     model = request_body.model
+    requested_model = model
     use_server_agent = (
         agent is not None
         and not request_body.tools
@@ -169,6 +176,46 @@ async def chat_completions(request_body: ChatCompletionRequest, request: Request
 
     # Inject memory context into messages before dispatching
     config = getattr(request.app.state, "config", None)
+
+    # Small local models may answer as if they created a file even though
+    # Ollama explicitly reports that they cannot call tools. For explicit
+    # office-file requests, route to a configured local model that advertises
+    # the `tools` capability instead of allowing a false success response.
+    latest_user_text = next(
+        (
+            message.content
+            for message in reversed(request_body.messages)
+            if message.role == "user" and message.content
+        ),
+        "",
+    )
+
+    if use_server_agent and requests_file_creation(latest_user_text):
+        capabilities = _model_capabilities(engine, model)
+        if capabilities is not None and "tools" not in capabilities:
+            preferred = (
+                getattr(getattr(config, "intelligence", None), "default_model", "")
+                if config is not None
+                else ""
+            )
+            candidates = [preferred, *engine.list_models()]
+            fallback = next(
+                (
+                    candidate
+                    for candidate in dict.fromkeys(candidates)
+                    if candidate
+                    and "tools" in (_model_capabilities(engine, candidate) or [])
+                ),
+                "",
+            )
+            if fallback:
+                logging.getLogger("openjarvis.server").info(
+                    "Routing file creation from %s to tool-capable model %s",
+                    model,
+                    fallback,
+                )
+                model = fallback
+                request_body.model = fallback
     memory_backend = getattr(request.app.state, "memory_backend", None)
     if (
         config is not None
@@ -303,6 +350,7 @@ async def chat_completions(request_body: ChatCompletionRequest, request: Request
                 model,
                 request_body,
                 complexity_info,
+                requested_model=requested_model,
                 trace_store=getattr(request.app.state, "trace_store", None),
                 bus=getattr(request.app.state, "bus", None),
                 memory_service=getattr(request.app.state, "memory_service", None),
@@ -449,6 +497,51 @@ def _engine_key_for_model(engine: Any, model: str) -> str | None:
     return None
 
 
+def _model_capabilities(engine: Any, model: str) -> list[str] | None:
+    """Resolve optional model capabilities through nested engine wrappers."""
+    from openjarvis.engine.multi import MultiEngine
+    from openjarvis.security.guardrails import GuardrailsEngine
+    from openjarvis.telemetry.instrumented_engine import InstrumentedEngine
+
+    current = engine
+    seen: set[int] = set()
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        resolver = getattr(current, "model_capabilities", None)
+        if callable(resolver):
+            try:
+                capabilities = resolver(model)
+                if capabilities is not None:
+                    return capabilities
+            except Exception:
+                pass
+
+        # MultiEngine may own a wrapper whose optional capability resolver
+        # returned None. Descend to the concrete engine and keep looking.
+        if isinstance(current, MultiEngine):
+            try:
+                current = current._engine_for(model)
+                continue
+            except Exception:
+                return None
+        if isinstance(current, InstrumentedEngine):
+            current = current._inner
+            continue
+        if isinstance(current, GuardrailsEngine):
+            current = current._engine
+            continue
+
+        nested = next(
+            (
+                value
+                for name in ("_inner", "_engine", "engine", "inner")
+                if (value := getattr(current, name, None)) is not None
+                and value is not current
+            ),
+            None,
+        )
+        current = nested
+    return None
 def _uses_direct_cloud_router(engine: Any, model: str) -> bool:
     """Whether *model* should bypass the configured engine for direct cloud."""
     from openjarvis.server.cloud_router import is_cloud_model
@@ -588,6 +681,65 @@ def _get_agent_model_lock(agent: Any) -> threading.Lock:
         return lock
 
 
+def _generated_files_from_agent_result(
+    result: Any,
+    trace: Any = None,
+) -> list[GeneratedFileMeta]:
+    """Collect successfully created files from an agent result or its trace.
+
+    Some agent/collector combinations preserve the tool metadata only on the
+    trace step even though the tool really ran.  The download card must be
+    based on a confirmed successful tool invocation, never on model prose.
+    """
+    records: list[tuple[str, bool, dict[str, Any]]] = []
+    for tool_result in getattr(result, "tool_results", []) or []:
+        records.append(
+            (
+                str(getattr(tool_result, "tool_name", "")),
+                bool(getattr(tool_result, "success", False)),
+                dict(getattr(tool_result, "metadata", {}) or {}),
+            )
+        )
+
+    for step in getattr(trace, "steps", []) or []:
+        step_type = getattr(step, "step_type", "")
+        step_value = getattr(step_type, "value", step_type)
+        if str(step_value) != "tool_call":
+            continue
+        step_input = getattr(step, "input", {}) or {}
+        step_output = getattr(step, "output", {}) or {}
+        records.append(
+            (
+                str(step_input.get("tool", "")),
+                bool(step_output.get("success", False)),
+                dict(getattr(step, "metadata", {}) or {}),
+            )
+        )
+
+    files: list[GeneratedFileMeta] = []
+    seen: set[str] = set()
+    for tool_name, success, metadata in records:
+        filename = metadata.get("filename")
+        if (
+            not success
+            or tool_name not in {"create_document", "create_spreadsheet"}
+            or not isinstance(filename, str)
+            or not filename
+            or filename in seen
+        ):
+            continue
+        seen.add(filename)
+        files.append(
+            GeneratedFileMeta(
+                filename=filename,
+                format=str(metadata.get("format", "")),
+                size_bytes=int(metadata.get("size_bytes", 0) or 0),
+                download_url=f"/v1/generated-files/{quote(filename, safe='')}",
+            )
+        )
+    return files
+
+
 def _handle_agent(
     agent,
     model: str,
@@ -622,6 +774,7 @@ def _handle_agent(
     # Locked for the full override-run-restore cycle (#759): only the
     # override/restore lines racing wouldn't be enough, since agent.run()
     # itself reads self._model throughout the call.
+    collector = None
     with _get_agent_model_lock(agent):
         original_model = agent._model
         if model:
@@ -654,6 +807,11 @@ def _handle_agent(
         if Path(audio_path).exists():
             audio_meta = AudioMeta(url="/api/digest/audio")
 
+    generated_files = _generated_files_from_agent_result(
+        result,
+        collector.last_trace if collector is not None else None,
+    )
+
     return ChatCompletionResponse(
         model=model,
         choices=[
@@ -662,6 +820,7 @@ def _handle_agent(
                     role="assistant",
                     content=result.content,
                     audio=audio_meta,
+                    generated_files=generated_files,
                 ),
                 finish_reason="stop",
             )
@@ -677,6 +836,7 @@ async def _handle_agent_stream(
     req: ChatCompletionRequest,
     complexity_info=None,
     *,
+    requested_model: str | None = None,
     trace_store=None,
     bus=None,
     memory_service=None,
@@ -700,6 +860,8 @@ async def _handle_agent_stream(
             break
 
     async def generate():
+        import json as _json
+
         first_chunk = ChatCompletionChunk(
             id=chunk_id,
             model=model,
@@ -707,9 +869,42 @@ async def _handle_agent_stream(
         )
         yield f"data: {first_chunk.model_dump_json()}\n\n"
 
-        try:
-            response = await asyncio.to_thread(
-                _handle_agent,
+        if requested_model and requested_model != model:
+            switch_data = {
+                "from_model": requested_model,
+                "to_model": model,
+                "message": (
+                    f"Alternando temporariamente de {requested_model} para {model}."
+                ),
+            }
+            yield "event: model_switch\n"
+            yield f"data: {_json.dumps(switch_data)}\n\n"
+
+        event_queue: asyncio.Queue[tuple[str, dict[str, Any]]] = asyncio.Queue()
+        loop = asyncio.get_running_loop()
+        worker_thread_id: int | None = None
+        forwarded_types = (
+            EventType.AGENT_TURN_START,
+            EventType.AGENT_STATUS,
+            EventType.INFERENCE_START,
+            EventType.TOOL_CALL_START,
+            EventType.TOOL_CALL_END,
+        )
+
+        def forward_event(event) -> None:
+            # EventBus is process-wide. Keep each SSE stream scoped to the
+            # worker thread executing its own agent request.
+            if worker_thread_id is None or threading.get_ident() != worker_thread_id:
+                return
+            loop.call_soon_threadsafe(
+                event_queue.put_nowait,
+                (event.event_type.value, event.data),
+            )
+
+        def run_agent():
+            nonlocal worker_thread_id
+            worker_thread_id = threading.get_ident()
+            return _handle_agent(
                 agent,
                 model,
                 req,
@@ -717,6 +912,26 @@ async def _handle_agent_stream(
                 trace_store=trace_store,
                 bus=bus,
             )
+
+        if bus is not None:
+            for event_type in forwarded_types:
+                bus.subscribe(event_type, forward_event)
+        try:
+            agent_task = asyncio.create_task(asyncio.to_thread(run_agent))
+            while not agent_task.done():
+                try:
+                    event_name, event_data = await asyncio.wait_for(
+                        event_queue.get(), timeout=0.1
+                    )
+                except TimeoutError:
+                    continue
+                yield f"event: {event_name}\n"
+                yield f"data: {_json.dumps(event_data, default=str)}\n\n"
+            response = await agent_task
+            while not event_queue.empty():
+                event_name, event_data = event_queue.get_nowait()
+                yield f"event: {event_name}\n"
+                yield f"data: {_json.dumps(event_data, default=str)}\n\n"
         except Exception as exc:
             logging.getLogger("openjarvis.server").error(
                 "Agent stream error: %s",
@@ -738,8 +953,22 @@ async def _handle_agent_stream(
             yield f"data: {error_chunk.model_dump_json()}\n\n"
             yield "data: [DONE]\n\n"
             return
+        finally:
+            if bus is not None:
+                for event_type in forwarded_types:
+                    bus.unsubscribe(event_type, forward_event)
 
         content = _response_content(response)
+        generated_files = response.choices[0].message.generated_files
+        if generated_files:
+            yield "event: generated_files\n"
+            yield (
+                "data: "
+                + _json.dumps(
+                    {"files": [item.model_dump() for item in generated_files]}
+                )
+                + "\n\n"
+            )
         if content:
             content_chunk = ChatCompletionChunk(
                 id=chunk_id,
@@ -747,8 +976,6 @@ async def _handle_agent_stream(
                 choices=[StreamChoice(delta=DeltaMessage(content=content))],
             )
             yield f"data: {content_chunk.model_dump_json()}\n\n"
-
-        import json as _json
 
         finish_chunk = ChatCompletionChunk(
             id=chunk_id,
