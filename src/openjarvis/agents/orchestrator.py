@@ -472,6 +472,15 @@ def _requested_item_kind(input_text: str) -> str | None:
     ):
         if singular in text or plural in text:
             return plural
+    # Generic list requests (for example, "cinco notebooks" or "5 bancos")
+    # carry their own item type; do not require a hard-coded domain list.
+    match = re.search(
+        r"\b(?:\d+|um|uma|dois|duas|tres|quatro|cinco|seis|sete|oito)\s+"
+        r"(?:(?:melhores|principais|recomendad[oa]s?)\s+)?(?P<kind>[a-z]{3,})",
+        text,
+    )
+    if match:
+        return match.group("kind")
     return None
 
 
@@ -548,9 +557,25 @@ def _source_ledger_marker(sources: list[dict[str, object]]) -> str:
 
 def _presented_items(text: str) -> list[str]:
     """Extract answer labels without treating ordinary prose as an option set."""
-    items: list[str] = []
-    patterns = (
+    def collect(patterns: tuple[re.Pattern[str], ...]) -> list[str]:
+        items: list[str] = []
+        for pattern in patterns:
+            for match in pattern.finditer(text):
+                item = re.sub(r"\s+", " ", match.group("item")).strip(" .,:;-")
+                if item and item not in items:
+                    items.append(item)
+        return items
+
+    numbered = collect((
         _ORDERED_LIST_ITEM_RE,
+        re.compile(
+            r"^\s*(?:\*\*)?\d+[.)]\s*(?P<item>[^\n:*]{2,100})(?:\*\*)?",
+            re.MULTILINE,
+        ),
+    ))
+    if len(numbered) >= 2:
+        return numbered
+    return collect((
         re.compile(
             r"^\s*#{1,6}\s*\d+[.)]?\s*(?:\*\*)?(?P<item>[^\n:*]{2,100})",
             re.MULTILINE,
@@ -559,13 +584,7 @@ def _presented_items(text: str) -> list[str]:
             r"^\s*#{2,6}\s*(?:\*\*)?(?P<item>[^\n:*]{2,100})",
             re.MULTILINE,
         ),
-    )
-    for pattern in patterns:
-        for match in pattern.finditer(text):
-            item = re.sub(r"\s+", " ", match.group("item")).strip(" .,:;-")
-            if item and item not in items:
-                items.append(item)
-    return items
+    ))
 
 
 def _research_context_marker(input_text: str, answer: str) -> str:
