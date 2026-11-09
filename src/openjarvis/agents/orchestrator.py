@@ -1998,6 +1998,12 @@ class OrchestratorAgent(ToolUsingAgent):
             context.conversation.messages if context is not None else None
         )
         queries = _web_search_queries(input_text, context_messages, documents)
+        # Web search receives only these generated queries, never the complete
+        # chat transcript.  Re-seed the outbound taint boundary accordingly:
+        # unrelated contact details in an earlier turn must not block a public
+        # lookup such as an exchange rate, while a sensitive value present in
+        # the query itself remains protected.
+        self._executor.begin_session(queries)
         if len(queries) == 1:
             tool_call = ToolCall(
                 id="required_web_search",
