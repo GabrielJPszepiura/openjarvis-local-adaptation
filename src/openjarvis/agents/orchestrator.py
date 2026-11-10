@@ -620,6 +620,18 @@ def _choice_reference(input_text: str) -> tuple[int | None, str | None]:
     return count, _requested_item_kind(input_text)
 
 
+def _has_explicit_ordinal_item_reference(input_text: str) -> bool:
+    """Distinguish ``três primeiros países`` from ``primeira viagem``."""
+    return bool(
+        re.search(
+            r"\b(?:primeir(?:o|os|a|as)|segund(?:o|os|a|as)|"
+            r"terceir(?:o|os|a|as)|quart(?:o|os|a|as)|quint(?:o|os|a|as))\s+"
+            r"(?:itens?|paises?|produtos?|opcoes?|resultados?)\b",
+            _plain_text(input_text),
+        )
+    )
+
+
 def _research_context_from_message(message: Message) -> dict[str, object] | None:
     match = _RESEARCH_CONTEXT_RE.search(message.text)
     if not match:
@@ -687,11 +699,18 @@ def _choice_options(input_text: str, messages: list[Message]) -> list[str]:
         return []
     recorded = _research_context_from_message(message)
     if recorded:
-        return list(recorded["items"])
-    _, requested_kind = _choice_reference(input_text)
-    if requested_kind == "paises":
-        return _countries_from_context([message])
-    return _presented_items(message.text)
+        options = list(recorded["items"])
+    else:
+        _, requested_kind = _choice_reference(input_text)
+        if requested_kind == "paises":
+            options = _countries_from_context([message])
+        else:
+            options = _presented_items(message.text)
+    if _has_explicit_ordinal_item_reference(input_text):
+        count = _ordinal_context_count(input_text)
+        if count:
+            return options[:count]
+    return options
 
 
 def _choice_research_criteria(input_text: str) -> str:
@@ -711,9 +730,13 @@ def _choice_prior_research_context(input_text: str, messages: list[Message]) -> 
         return ""
     body = _RESEARCH_LEDGER_RE.sub("", message.text)
     body = _RESEARCH_CONTEXT_RE.sub("", body).strip()
-    body = body[:3000].rstrip()
     sources = _research_ledger_from_message(message)
     options = _choice_options(input_text, messages)
+    if _has_explicit_ordinal_item_reference(input_text):
+        # Do not leak a fourth option from the original answer into a request
+        # for "the first three". The focused queries below are the evidence.
+        body = "\n".join(options)
+    body = body[:3000].rstrip()
     source_lines = "\n".join(
         f"- {source['title']}: {source['url']}" for source in sources[:6]
     )
@@ -926,6 +949,10 @@ def _web_search_queries(
     if (
         (_choice_follow_up_instruction(input_text) or _comparison_follow_up_instruction(input_text))
         and choice_options
+        # "esses três países" is a choice over the stored set; only an
+        # explicit ordinal such as "os três primeiros" belongs to the
+        # ordered-item resolver below.
+        and not _has_explicit_ordinal_item_reference(input_text)
     ):
         criterion = _choice_research_criteria(input_text)
         return [f"{option} {criterion}".strip() for option in choice_options]
@@ -1416,6 +1443,51 @@ def _comparison_follow_up_instruction(input_text: str) -> str:
     )
 
 
+def _has_complete_requested_list(input_text: str, answer: str) -> bool:
+    """Return whether an answer visibly fulfilled an explicit list request.
+
+    A small local model can stop after naming items in one sentence even when
+    the evidence and prompt ask for a useful list.  This deliberately checks
+    only the visible structure we require from the user-facing answer: the
+    requested number of labelled items, each followed by some explanation.
+    It is not used for ordinary factual questions or contextual comparisons.
+    """
+    requested_count = _requested_list_count(input_text)
+    if (
+        not requested_count
+        or _choice_follow_up_instruction(input_text)
+        or _CONTEXTUAL_WEB_REFERENCE_RE.search(_plain_text(input_text))
+    ):
+        return True
+    items = _presented_items(answer)
+    if len(items) != requested_count:
+        return False
+    # Labels such as "1. Japão" alone are not a useful recommendation.  The
+    # formatter accepts a compact reason, but rejects a bare ranking.
+    return all(len(item.split()) >= 1 for item in items) and len(_plain_text(answer)) >= (
+        requested_count * 45
+    )
+
+
+def _list_completion_instruction(input_text: str, incomplete_answer: str) -> str:
+    """Ask for one evidence-bound repair instead of accepting a bare ranking."""
+    requested_count = _requested_list_count(input_text)
+    return (
+        "\n<mandatory_list_repair>\n"
+        f"A resposta anterior ficou incompleta para um pedido de {requested_count} itens. "
+        "Reescreva a resposta agora, usando somente as evidências acima. Entregue "
+        f"exatamente {requested_count} itens numerados no formato `1. **Nome** — "
+        "motivo concreto`. Dê pelo menos uma frase curta para cada item. Não abra "
+        "com uma recusa nem diga que dados do ano não estão disponíveis se os "
+        "resultados já trazem evidência utilizável de 2025/2026. Se houver divergência "
+        "entre rankings, apresente-a brevemente depois da lista, sem deixar de "
+        "responder. Não inclua fontes ou URLs.\n"
+        "Resposta anterior incompleta (não a repita):\n"
+        + incomplete_answer[:1200]
+        + "\n</mandatory_list_repair>"
+    )
+
+
 def _web_grounded_input(
     input_text: str,
     search_result: str,
@@ -1492,7 +1564,9 @@ def _web_grounded_input(
         + "os candidatos concretos encontrados nas fontes e explique brevemente a "
         + "variação de preço ou disponibilidade, se relevante. Para cada item, dê "
         + "um motivo curto e concreto da recomendação; não entregue apenas nomes ou "
-        + "um ranking seco.\n</requested_list_coverage>"
+        + "um ranking seco. Se os resultados já contêm evidência útil datada de "
+        + "2025 ou 2026, não diga que os dados de 2026 estão indisponíveis: informe "
+        + "o ano do ranking e responda normalmente.\n</requested_list_coverage>"
         if requested_count
         else ""
     )
@@ -1984,6 +2058,34 @@ class OrchestratorAgent(ToolUsingAgent):
                 **kwargs,
             )
             result.metadata["tool_route"] = route
+
+            # Do not silently accept a bare ranking for a request such as
+            # "pesquise 3 países".  Retrieval may have succeeded while a
+            # small local model stops after one sentence.  Give it one
+            # evidence-bound rewrite; this does not perform another search or
+            # permit it to invent candidates.
+            if (
+                evidence_research_requested
+                and _requested_list_count(decision.instruction)
+                and not _has_complete_requested_list(decision.instruction, result.content)
+            ):
+                self._emit_status("Completando a lista solicitada…", stage="generation")
+                repaired = self._run_function_calling(
+                    analysis_input
+                    + _list_completion_instruction(
+                        decision.instruction, result.content
+                    ),
+                    None,
+                    disabled_tool_names=disabled_tools,
+                    max_continuations=2,
+                    **kwargs,
+                )
+                if _has_complete_requested_list(decision.instruction, repaired.content):
+                    repaired.metadata["tool_route"] = route
+                    repaired.metadata["list_completion_repair"] = True
+                    result = repaired
+                else:
+                    result.metadata["list_completion_repair"] = False
 
         if required_tool_results:
             result.tool_results = required_tool_results + result.tool_results
