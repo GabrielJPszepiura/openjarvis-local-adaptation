@@ -928,7 +928,10 @@ def _web_search_queries(
         return [f"{option} {criterion}".strip() for option in choice_options]
 
     requested_count = _requested_list_count(input_text)
-    if requested_count and requested_count >= 4:
+    # An ordinal follow-up ("esses três primeiros") has its own per-item
+    # resolver below. Fresh ranked lists of three or more deserve diversified
+    # retrieval too; a single stale blog must not force an unnecessary refusal.
+    if requested_count and requested_count >= 3 and not _ordinal_context_count(input_text):
         base_query = _web_search_query(input_text, context_messages, documents)
         refinements = (
             "critérios e comparação",
@@ -1481,7 +1484,9 @@ def _web_grounded_input(
         "porque não existe certeza absoluta. Mencione a data da evidência de "
         "forma breve apenas quando ela alterar materialmente a conclusão. Não "
         "invente a data atual nem especule sobre uma mudança que os resultados "
-        "não mostram.\n</answer_quality>"
+        "não mostram. Se as evidências disponíveis forem mais antigas, ainda "
+        "responda com o melhor material encontrado e informe o ano; não recuse "
+        "apenas por falta de uma fonte recente.\n</answer_quality>"
     )
     return (
         input_text
