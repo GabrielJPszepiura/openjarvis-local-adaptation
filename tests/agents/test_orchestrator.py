@@ -17,6 +17,7 @@ from openjarvis.agents.orchestrator import (
     _hide_unretrieved_links,
     _has_complete_requested_list,
     _choice_follow_up_instruction,
+    _comparison_follow_up_instruction,
     _choice_options,
     _choice_prior_research_context,
     _links_requested,
@@ -27,6 +28,7 @@ from openjarvis.agents.orchestrator import (
     _list_completion_instruction,
     _presented_items,
     _source_ledger_marker,
+    _format_recorded_sources,
     _web_grounded_input,
     _web_search_query,
     _web_search_queries,
@@ -349,6 +351,46 @@ class TestOrchestratorAgent:
         repair = _list_completion_instruction(request, bare_ranking)
         assert "exatamente 3 itens numerados" in repair
         assert "nem diga que dados do ano não estão disponíveis" in repair
+
+    def test_comparison_recovers_option_set_after_a_source_listing(self):
+        answer = (
+            "1. **Estados Unidos** — variedade de roteiros.\n"
+            "2. **Itália** — cultura e gastronomia.\n"
+            "3. **Portugal** — cidades históricas e litoral."
+        )
+        request = "Pesquise 3 melhores países para turismo."
+        messages = [
+            Message(
+                role=Role.ASSISTANT,
+                content=answer + _research_context_marker(request, answer),
+            ),
+            Message(
+                role=Role.ASSISTANT,
+                content=_format_recorded_sources(
+                    [
+                        {
+                            "title": "Ranking de turismo",
+                            "url": "https://example.test/ranking",
+                            "summary": "Ranking de destinos.",
+                        }
+                    ]
+                ),
+            ),
+        ]
+        comparison = (
+            "Agora compare os três países e explique os pontos positivos "
+            "e os cuidados de cada um para uma viagem de turismo."
+        )
+
+        assert _choice_options(comparison, messages) == [
+            "Estados Unidos", "Itália", "Portugal"
+        ]
+        assert _comparison_follow_up_instruction(comparison)
+        assert _web_search_queries(comparison, messages) == [
+            "Estados Unidos uma viagem de turismo",
+            "Itália uma viagem de turismo",
+            "Portugal uma viagem de turismo",
+        ]
 
     def test_generic_list_request_preserves_the_requested_item_kind(self):
         assert _requested_item_kind("Quais são cinco notebooks recomendados?") == "notebooks"
