@@ -62,7 +62,7 @@ from openjarvis.analytics.redaction import (
         "ghp_1234567890abcdefghij1234567890abcd",
         "gho_1234567890abcdefghij1234567890abcd",
         "AKIAIOSFODNN7EXAMPLE",
-        "AIzaSyD-1234567890abcdefghij1234567890",
+        "AIza" + "Sy1234567890abcdefghijklmnopqrstuvw",
         "ya29.a0AfH6SMBabc123def456ghi789jkl",
         # JWT
         "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0In0.dozjgNryP4J3jVmNHl0w5N_XgL0n3I9PlFUP0THsR8U",

@@ -56,7 +56,7 @@ O ambiente usado nos testes possui o modelo `qwen3.5:2b`.
 No PowerShell, a partir da pasta do projeto:
 
 ```powershell
-cd C:\Users\gabri\OpenJarvis
+cd <pasta-do-projeto>
 .\.venv\Scripts\jarvis.exe gui
 ```
 
