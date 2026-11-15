@@ -568,6 +568,27 @@ class TestOrchestratorAgent:
         assert "[Fonte usada](https://example.gov.br/dado)" in result.content
         assert engine.generate.call_count == 0
 
+    def test_imperative_source_request_recovers_recorded_sources(self):
+        engine = _make_engine_no_tools("Não deve gerar uma nova resposta.")
+        web = _WebSearchStub()
+        agent = OrchestratorAgent(engine, "test-model", tools=[web])
+        context = AgentContext()
+        context.conversation.add(
+            Message(
+                role=Role.ASSISTANT,
+                content=(
+                    "Resposta anterior.\n<!-- openjarvis-research-sources:"
+                    '[{"title":"Fonte usada","url":"https://example.gov.br/dado"}] -->'
+                ),
+            )
+        )
+
+        result = agent.run("Me passe as fontes de pesquisa.", context=context)
+
+        assert web.calls == []
+        assert "[Fonte usada](https://example.gov.br/dado)" in result.content
+        assert engine.generate.call_count == 0
+
     def test_source_question_without_ledger_does_not_generate_sources(self):
         engine = _make_engine_no_tools("Fonte inventada.")
         web = _WebSearchStub()
@@ -652,6 +673,8 @@ class TestOrchestratorAgent:
         assert "pediu explicitamente" in requested
         assert "Data atual do sistema:" in ordinary
         assert "também é aceitável" in ordinary
+        assert "<answer_quality>" in ordinary
+        assert "não pode responder só" in ordinary
 
     def test_chat_response_requests_readable_markdown(self):
         formatted = _chat_format_instruction("Explique o resultado.")
