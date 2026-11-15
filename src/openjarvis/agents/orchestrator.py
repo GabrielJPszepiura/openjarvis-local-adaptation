@@ -617,7 +617,28 @@ def _choice_reference(input_text: str) -> tuple[int | None, str | None]:
             count = min(int(match.group(1)), 8)
         elif match.group(2):
             count = _NUMBER_WORD_COUNTS.get(match.group(2))
+    # A comparison often says simply "compare os três países", without the
+    # selection verbs "entre" or "dentre". This is still a reference to an
+    # existing option set, never a request to create a new ranking.
+    if count is None:
+        match = re.search(
+            r"\b(?:esses?|essas?|estes?|estas?|os|as|dos|das)\s+"
+            r"(?:(\d+)|(um|uma|dois|duas|tres|quatro|cinco))\s+"
+            r"(?:(?:melhores|principais)\s+)?[a-z]{3,}\b",
+            text,
+        )
+        if match:
+            if match.group(1):
+                count = min(int(match.group(1)), 8)
+            else:
+                count = _NUMBER_WORD_COUNTS.get(match.group(2))
     return count, _requested_item_kind(input_text)
+
+
+def _has_contextual_option_reference(input_text: str) -> bool:
+    """Return whether the user explicitly points to a prior numbered set."""
+    count, kind = _choice_reference(input_text)
+    return count is not None and kind is not None
 
 
 def _has_explicit_ordinal_item_reference(input_text: str) -> bool:
@@ -664,6 +685,10 @@ def _referenced_research_message(
     legacy_candidates: list[Message] = []
     for message in reversed(messages):
         if message.role != Role.ASSISTANT:
+            continue
+        # A provenance response is intentionally a list of links. It must
+        # never compete with the earlier answer that introduced the options.
+        if message.text.lstrip().startswith("Estas são as fontes usadas na resposta anterior:"):
             continue
         recorded = _research_context_from_message(message)
         if recorded:
@@ -1431,7 +1456,7 @@ def _comparison_follow_up_instruction(input_text: str) -> str:
     """Keep a contextual comparison bound to already presented options."""
     text = _plain_text(input_text)
     if not (
-        _CONTEXTUAL_WEB_REFERENCE_RE.search(text)
+        (_CONTEXTUAL_WEB_REFERENCE_RE.search(text) or _has_contextual_option_reference(input_text))
         and re.search(r"\b(?:compare|comparacao|vantagens?|desvantagens?|cuidados|pontos)\b", text)
     ):
         return ""
