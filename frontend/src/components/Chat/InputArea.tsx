@@ -1,11 +1,13 @@
 import { useState, useRef, useCallback, useEffect } from 'react';
-import { Send, Square, Paperclip, Search } from 'lucide-react';
+import { useTranslation } from 'react-i18next';
+import { FileText, FileUp, LoaderCircle, Paperclip, Search, Send, Square, X } from 'lucide-react';
 import { toast } from 'sonner';
 import { useAppStore, generateId } from '../../lib/store';
 import { streamChat, streamResearch } from '../../lib/sse';
-import { fetchSavings, getBase } from '../../lib/api';
+import { extractChatAttachments, fetchSavings, getBase } from '../../lib/api';
 import { listConnectors, getSyncStatus } from '../../lib/connectors-api';
 import { serializeToolCallArguments } from '../../lib/tool-call';
+import { messageContentForApi, responseLanguageInstruction } from '../../lib/chat-attachments';
 import {
   engineFromCompletionChunk,
   resolveChatEngine,
@@ -13,7 +15,9 @@ import {
 import { MicButton } from './MicButton';
 import { useSpeech } from '../../hooks/useSpeech';
 import type {
+  ChatAttachment,
   ChatMessage,
+  GeneratedFile,
   MessageTelemetry,
   ResearchSearchTrace,
   ResearchSource,
@@ -80,10 +84,16 @@ function useResearchCorpusSync(enabled: boolean): {
 }
 
 export function InputArea() {
+  const { t, i18n } = useTranslation();
   const [input, setInput] = useState('');
+  const [attachments, setAttachments] = useState<ChatAttachment[]>([]);
+  const [attachmentLoading, setAttachmentLoading] = useState(false);
+  const [isDraggingFiles, setIsDraggingFiles] = useState(false);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
   const abortRef = useRef<AbortController | null>(null);
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const dragDepthRef = useRef(0);
 
   const activeId = useAppStore((s) => s.activeId);
   const selectedModel = useAppStore((s) => s.selectedModel);
@@ -172,14 +182,17 @@ export function InputArea() {
   }, [resetStream]);
 
   const sendMessage = useCallback(async () => {
-    const content = input.trim();
-    if (!content || streamState.isStreaming) return;
+    const typedContent = input.trim();
+    if ((!typedContent && attachments.length === 0) || streamState.isStreaming || attachmentLoading) return;
+    const content = typedContent || t('chat.analyzeAttachments');
     if (!selectedModel) {
       toast.error('Pick a model first (⌘K)');
       return;
     }
 
+    const sentAttachments = attachments;
     setInput('');
+    setAttachments([]);
 
     let convId = activeId;
     if (!convId) {
@@ -191,15 +204,25 @@ export function InputArea() {
       role: 'user',
       content,
       timestamp: Date.now(),
+      attachments: sentAttachments.length ? sentAttachments : undefined,
     };
     addMessage(convId, userMsg);
 
-    // Build API messages before adding assistant placeholder
+    // Keep model output aligned with the language selected in the interface.
+    // This is separate from UI translation: local models otherwise infer the
+    // response language from document contents, which may be English.
+    const responseLanguage = i18n.resolvedLanguage || i18n.language;
+    const languageInstruction = responseLanguageInstruction(responseLanguage);
     const currentMessages = useAppStore.getState().messages;
-    const apiMessages = currentMessages.map((m) => ({
-      role: m.role,
-      content: m.content,
-    }));
+    const apiMessages = [
+      { role: 'system', content: languageInstruction },
+      ...currentMessages.map((m, index) => ({
+        role: m.role,
+        content: index === currentMessages.length - 1 && m.role === 'user'
+          ? `${messageContentForApi(m, responseLanguage)}\n\n${languageInstruction}`
+          : messageContentForApi(m, responseLanguage),
+      })),
+    ];
 
     const assistantMsg: ChatMessage = {
       id: generateId(),
@@ -224,9 +247,11 @@ export function InputArea() {
     let usage: TokenUsage | undefined;
     let complexity: { score: number; tier: string; suggested_max_tokens: number } | undefined;
     let routedEngine: string | undefined;
+    let effectiveModel = selectedModel;
     const toolCalls: ToolCallInfo[] = [];
     const researchTraces: ResearchSearchTrace[] = [];
     const researchSourcesByRef = new Map<number, ResearchSource>();
+    const generatedFiles: GeneratedFile[] = [];
     const flushSources = () =>
       Array.from(researchSourcesByRef.values()).sort((a, b) => a.ref - b.ref);
     let lastFlush = 0;
@@ -235,7 +260,8 @@ export function InputArea() {
     setStreamState({
       conversationId: convId,
       isStreaming: true,
-      phase: deepResearch ? 'Researching...' : 'Generating...',
+      phase: deepResearch ? t('chat.statusWeb') : t('chat.statusRouting'),
+      effectiveModel: selectedModel,
       elapsedMs: 0,
       activeToolCalls: [],
       content: '',
@@ -252,7 +278,7 @@ export function InputArea() {
     try {
       if (deepResearch) {
         for await (const ev of streamResearch(
-          content,
+          `${messageContentForApi(userMsg, responseLanguage)}\n\n${languageInstruction}`,
           selectedModel,
           controller.signal,
         )) {
@@ -382,12 +408,70 @@ export function InputArea() {
         const eventName = sseEvent.event;
 
         if (eventName === 'agent_turn_start') {
-          setStreamState({ phase: 'Agent thinking...' });
+          // The orchestrator may publish a precise phase (routing,
+          // attachments, web, artifact creation...) immediately before the
+          // lower-level agent announces a new turn.  A turn-start event is
+          // only a lifecycle marker, so it must not erase that more useful
+          // user-facing status.
+          const currentPhase = useAppStore.getState().streamState.phase;
+          if (!currentPhase || currentPhase === 'Generating...' || currentPhase === 'Researching...') {
+            setStreamState({ phase: t('chat.statusThinking') });
+          }
+        } else if (eventName === 'model_switch') {
+          try {
+            const data = JSON.parse(sseEvent.data) as {
+              from_model?: string;
+              to_model?: string;
+            };
+            if (data.to_model) {
+              effectiveModel = data.to_model;
+              setStreamState({
+                effectiveModel,
+                phase: t('chat.statusModelSwitch', {
+                  from: data.from_model || selectedModel,
+                  to: effectiveModel,
+                }),
+              });
+              useAppStore.getState().addLogEntry({
+                timestamp: Date.now(), level: 'info', category: 'chat',
+                message: `Temporary model route: ${data.from_model || selectedModel} → ${effectiveModel}`,
+              });
+            }
+          } catch {}
+        } else if (eventName === 'agent_status') {
+          try {
+            const data = JSON.parse(sseEvent.data) as { stage?: string; message?: string };
+            const stageKeys: Record<string, string> = {
+              routing: 'chat.statusRouting',
+              confirm: 'chat.statusConfirm',
+              attachments: 'chat.statusAttachments',
+              web: 'chat.statusWeb',
+              generation: 'chat.statusGeneration',
+              artifact_creation: 'chat.statusArtifact',
+              validation: 'chat.statusValidation',
+            };
+            const phase = data.stage && stageKeys[data.stage]
+              ? t(stageKeys[data.stage])
+              : data.message;
+            if (phase) setStreamState({ phase });
+          } catch {}
         } else if (eventName === 'inference_start') {
-          setStreamState({ phase: 'Generating...' });
+          try {
+            const data = JSON.parse(sseEvent.data) as { model?: string };
+            if (data.model) effectiveModel = data.model;
+          } catch {}
+          // The orchestrator has already published the concrete operation
+          // (analyzing attachments, searching the web, preparing content...).
+          // Do not replace that useful status with the generic
+          // "Generating the response" label when inference begins.
+          const currentPhase = useAppStore.getState().streamState.phase;
+          setStreamState({
+            ...(currentPhase ? {} : { phase: t('chat.statusGenerating') }),
+            effectiveModel,
+          });
           useAppStore.getState().addLogEntry({
             timestamp: Date.now(), level: 'info', category: 'chat',
-            message: `Generating with ${selectedModel}...`,
+            message: `Generating with ${effectiveModel}...`,
           });
         } else if (eventName === 'tool_call_start') {
           try {
@@ -399,8 +483,13 @@ export function InputArea() {
               status: 'running',
             };
             toolCalls.push(tc);
+            const toolPhase = data.tool === 'web_search'
+              ? t('chat.statusWeb')
+              : data.tool === 'create_document' || data.tool === 'create_spreadsheet'
+                ? t('chat.statusArtifact')
+                : t('chat.statusCallingTool', { tool: data.tool });
             setStreamState({
-              phase: `Calling ${data.tool}...`,
+              phase: toolPhase,
               activeToolCalls: [...toolCalls],
             });
             updateLastAssistant(convId, accumulatedContent, [...toolCalls]);
@@ -420,11 +509,25 @@ export function InputArea() {
               tc.latency = data.latency;
               tc.result = data.result;
             }
+            const nextPhase = data.tool === 'web_search'
+              ? t('chat.statusAnalyzingSources')
+              : data.tool === 'create_document' || data.tool === 'create_spreadsheet'
+                ? t('chat.statusValidation')
+                : t('chat.statusGeneration');
             setStreamState({
-              phase: 'Generating...',
+              phase: nextPhase,
               activeToolCalls: [...toolCalls],
             });
             updateLastAssistant(convId, accumulatedContent, [...toolCalls]);
+          } catch {}
+        } else if (eventName === 'generated_files') {
+          try {
+            const data = JSON.parse(sseEvent.data) as { files?: GeneratedFile[] };
+            for (const file of data.files ?? []) {
+              if (!generatedFiles.some((item) => item.download_url === file.download_url)) {
+                generatedFiles.push(file);
+              }
+            }
           } catch {}
         } else {
           try {
@@ -484,7 +587,7 @@ export function InputArea() {
       });
       const telemetry: MessageTelemetry = {
         engine: engineLabel,
-        model_id: selectedModel,
+        model_id: effectiveModel,
         total_ms: totalMs,
         ttft_ms: ttftMs,
         tokens_per_sec: usage?.completion_tokens
@@ -517,6 +620,7 @@ export function InputArea() {
         audioMeta,
         researchTraces.length > 0 ? researchTraces : undefined,
         researchSourcesByRef.size > 0 ? flushSources() : undefined,
+        generatedFiles.length > 0 ? generatedFiles : undefined,
       );
       if (timerRef.current) {
         clearInterval(timerRef.current);
@@ -541,6 +645,10 @@ export function InputArea() {
     }
   }, [
     input,
+    attachments,
+    attachmentLoading,
+    t,
+    i18n,
     activeId,
     selectedModel,
     streamState.isStreaming,
@@ -554,6 +662,68 @@ export function InputArea() {
     maxTokens,
   ]);
 
+  const handleFilesSelected = useCallback(async (files: File[]) => {
+    if (files.length === 0) return;
+    if (attachments.length + files.length > 4) {
+      toast.error(t('chat.tooManyAttachments'));
+      return;
+    }
+    setAttachmentLoading(true);
+    try {
+      const extracted = await extractChatAttachments(files);
+      setAttachments((current) => [...current, ...extracted]);
+      if (extracted.some((attachment) => attachment.truncated)) {
+        toast.warning(t('chat.attachmentTruncated'));
+      }
+    } catch (error: any) {
+      toast.error(error?.message || t('chat.attachmentError'), { duration: 8000 });
+    } finally {
+      setAttachmentLoading(false);
+      if (fileInputRef.current) fileInputRef.current.value = '';
+    }
+  }, [attachments.length, t]);
+
+  useEffect(() => {
+    const containsFiles = (event: DragEvent) =>
+      Array.from(event.dataTransfer?.types ?? []).includes('Files');
+
+    const handleDragEnter = (event: DragEvent) => {
+      if (!containsFiles(event)) return;
+      event.preventDefault();
+      dragDepthRef.current += 1;
+      setIsDraggingFiles(true);
+    };
+    const handleDragOver = (event: DragEvent) => {
+      if (!containsFiles(event)) return;
+      event.preventDefault();
+      if (event.dataTransfer) event.dataTransfer.dropEffect = 'copy';
+    };
+    const handleDragLeave = (event: DragEvent) => {
+      if (!containsFiles(event)) return;
+      event.preventDefault();
+      dragDepthRef.current = Math.max(0, dragDepthRef.current - 1);
+      if (dragDepthRef.current === 0) setIsDraggingFiles(false);
+    };
+    const handleDrop = (event: DragEvent) => {
+      if (!containsFiles(event)) return;
+      event.preventDefault();
+      dragDepthRef.current = 0;
+      setIsDraggingFiles(false);
+      if (streamState.isStreaming || modelLoading || attachmentLoading) return;
+      void handleFilesSelected(Array.from(event.dataTransfer?.files ?? []));
+    };
+
+    window.addEventListener('dragenter', handleDragEnter);
+    window.addEventListener('dragover', handleDragOver);
+    window.addEventListener('dragleave', handleDragLeave);
+    window.addEventListener('drop', handleDrop);
+    return () => {
+      window.removeEventListener('dragenter', handleDragEnter);
+      window.removeEventListener('dragover', handleDragOver);
+      window.removeEventListener('dragleave', handleDragLeave);
+      window.removeEventListener('drop', handleDrop);
+    };
+  }, [attachmentLoading, handleFilesSelected, modelLoading, streamState.isStreaming]);
   const handleKeyDown = (e: React.KeyboardEvent) => {
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault();
@@ -563,6 +733,29 @@ export function InputArea() {
 
   return (
     <div className="px-4 pb-4 pt-2" style={{ maxWidth: 'var(--chat-max-width)', margin: '0 auto', width: '100%' }}>
+      {isDraggingFiles && (
+        <div
+          className="pointer-events-none fixed inset-0 z-[100] flex items-center justify-center p-8"
+          style={{ background: 'color-mix(in srgb, var(--color-bg) 78%, transparent)' }}
+        >
+          <div
+            className="flex min-h-56 w-full max-w-2xl flex-col items-center justify-center gap-3 rounded-3xl border-2 border-dashed p-8 text-center"
+            style={{
+              background: 'var(--color-bg-secondary)',
+              borderColor: 'var(--color-accent)',
+              boxShadow: 'var(--shadow-lg)',
+            }}
+          >
+            <FileUp size={42} style={{ color: 'var(--color-accent)' }} />
+            <strong className="text-lg" style={{ color: 'var(--color-text)' }}>
+              {t('chat.dropDocuments')}
+            </strong>
+            <span className="text-sm" style={{ color: 'var(--color-text-secondary)' }}>
+              {t('chat.dropDocumentsHint')}
+            </span>
+          </div>
+        </div>
+      )}
       <div className="mb-2 flex flex-col gap-1">
         <div className="flex items-center gap-2">
           <button
@@ -576,10 +769,10 @@ export function InputArea() {
               border: `1px solid ${deepResearch ? 'var(--color-accent)' : 'var(--color-border)'}`,
               color: deepResearch ? 'var(--color-accent)' : 'var(--color-text-tertiary)',
             }}
-            title={deepResearch ? 'Deep Research: on' : 'Deep Research: off'}
+            title={deepResearch ? t('chat.deepResearchOn') : t('chat.deepResearchOff')}
           >
             <Search size={12} />
-            Deep Research
+            {t('nav.deepResearch')}
           </button>
         </div>
         {deepResearch && corpusSync.syncing && corpusSync.itemsSynced > 0 && (
@@ -595,6 +788,30 @@ export function InputArea() {
           </div>
         )}
       </div>
+      {attachments.length > 0 && (
+        <div className="mb-2 flex flex-wrap gap-2">
+          {attachments.map((attachment, index) => (
+            <div
+              key={`${attachment.name}-${index}`}
+              className="flex max-w-full items-center gap-2 rounded-lg px-2.5 py-1.5 text-xs"
+              style={{ background: 'var(--color-bg-secondary)', border: '1px solid var(--color-border)' }}
+            >
+              <FileText size={14} style={{ color: 'var(--color-accent)' }} />
+              <span className="max-w-52 truncate" title={attachment.name}>{attachment.name}</span>
+              <button
+                type="button"
+                onClick={() => setAttachments((current) => current.filter((_, itemIndex) => itemIndex !== index))}
+                disabled={streamState.isStreaming}
+                className="cursor-pointer rounded p-0.5 disabled:cursor-default disabled:opacity-50"
+                title={t('chat.removeAttachment')}
+                aria-label={t('chat.removeAttachment')}
+              >
+                <X size={13} />
+              </button>
+            </div>
+          ))}
+        </div>
+      )}
       <div
         className="flex items-center gap-2 rounded-2xl px-4 py-3 transition-shadow"
         style={{
@@ -603,12 +820,31 @@ export function InputArea() {
           boxShadow: 'var(--shadow-sm)',
         }}
       >
+        <input
+          ref={fileInputRef}
+          type="file"
+          multiple
+          accept=".txt,.md,.csv,.pdf,.docx,.xlsx"
+          className="hidden"
+          onChange={(event) => handleFilesSelected(Array.from(event.target.files ?? []))}
+        />
+        <button
+          type="button"
+          onClick={() => fileInputRef.current?.click()}
+          disabled={streamState.isStreaming || modelLoading || attachmentLoading}
+          className="shrink-0 cursor-pointer rounded-xl p-2 transition-colors disabled:cursor-default disabled:opacity-40"
+          style={{ color: 'var(--color-text-tertiary)' }}
+          title={t('chat.attachDocuments')}
+          aria-label={t('chat.attachDocuments')}
+        >
+          {attachmentLoading ? <LoaderCircle size={16} className="animate-spin" /> : <Paperclip size={16} />}
+        </button>
         <textarea
           ref={textareaRef}
           value={input}
           onChange={(e) => setInput(e.target.value)}
           onKeyDown={handleKeyDown}
-          placeholder={selectedModel ? 'Message OpenJarvis...' : 'Pick a model first (⌘K)...'}
+          placeholder={selectedModel ? t('chat.messagePlaceholder') : t('chat.pickModelPlaceholder')}
           rows={1}
           className="flex-1 bg-transparent outline-none resize-none text-sm leading-relaxed"
           style={{ color: 'var(--color-text)', maxHeight: '200px' }}
@@ -619,7 +855,7 @@ export function InputArea() {
             onClick={stopStreaming}
             className="p-2 rounded-xl transition-colors shrink-0 cursor-pointer"
             style={{ background: 'var(--color-error)', color: 'var(--color-on-accent)' }}
-            title="Stop generating"
+            title={t('chat.stopGenerating')}
           >
             <Square size={16} />
           </button>
@@ -633,12 +869,12 @@ export function InputArea() {
             />
             <button
               onClick={sendMessage}
-              disabled={streamState.isStreaming || !input.trim() || modelLoading || !selectedModel}
-              title={selectedModel ? 'Send message' : 'Pick a model first (⌘K)'}
+              disabled={streamState.isStreaming || attachmentLoading || (!input.trim() && attachments.length === 0) || modelLoading || !selectedModel}
+              title={selectedModel ? t('chat.sendMessage') : t('chat.pickModelPlaceholder')}
               className="p-2 rounded-xl transition-colors shrink-0 cursor-pointer disabled:opacity-30 disabled:cursor-default"
               style={{
-                background: input.trim() ? 'var(--color-accent)' : 'var(--color-bg-tertiary)',
-                color: input.trim() ? 'white' : 'var(--color-text-tertiary)',
+                background: (input.trim() || attachments.length > 0) ? 'var(--color-accent)' : 'var(--color-bg-tertiary)',
+                color: (input.trim() || attachments.length > 0) ? 'white' : 'var(--color-text-tertiary)',
               }}
             >
               <Send size={16} />
@@ -648,8 +884,8 @@ export function InputArea() {
       </div>
       <div className="flex items-center justify-center mt-2 text-[11px]" style={{ color: 'var(--color-text-tertiary)' }}>
         <span>
-          <kbd className="font-mono">Enter</kbd> to send &middot;{' '}
-          <kbd className="font-mono">Shift+Enter</kbd> for new line
+          <kbd className="font-mono">Enter</kbd> {t('chat.enterToSend')} &middot;{' '}
+          <kbd className="font-mono">Shift+Enter</kbd> {t('chat.newLine')}
         </span>
       </div>
     </div>

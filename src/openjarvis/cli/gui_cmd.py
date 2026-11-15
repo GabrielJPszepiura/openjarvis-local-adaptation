@@ -22,7 +22,7 @@ import click
 import psutil
 from rich.console import Console
 
-from openjarvis.core.config import DEFAULT_CONFIG_DIR
+from openjarvis.core.config import DEFAULT_CONFIG_DIR, load_config
 from openjarvis.security.file_utils import secure_write_json
 
 # Records the frontend this command started, so a later run can tell its own
@@ -391,6 +391,21 @@ def _api_healthy(port: int, timeout: float = 3.0) -> bool:
         return False
 
 
+def _wait_for_api(port: int, timeout: float = 45.0) -> bool:
+    """Wait for the API before opening the browser frontend.
+
+    ``jarvis start`` returns after it creates the daemon process, not after the
+    API is listening. Starting Vite immediately lets the first browser requests
+    race the API and can leave the model picker empty until a manual refresh.
+    """
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if _api_healthy(port, timeout=1.0):
+            return True
+        time.sleep(0.25)
+    return False
+
+
 def _daemon_pid_alive(port: int, *, require_ready: bool = False) -> bool:
     """Whether the daemon registered on *port* is still a live process.
 
@@ -508,22 +523,39 @@ def gui(frontend_port: int, api_port: int, no_server: bool, no_browser: bool) ->
                 "uv is required to start the API with desktop dependencies. "
                 "Install uv or use --no-server with an already-running API."
             )
+        config = load_config()
+        start_command = [
+            uv,
+            "run",
+            "--extra",
+            "desktop",
+            "jarvis",
+            "start",
+            "--port",
+            str(api_port),
+        ]
+        # A model name can be advertised by more than one healthy engine. Pass
+        # the configured choices through explicitly so a local-first setup
+        # cannot be redirected to a same-named remote catalogue model.
+        if config.engine.default:
+            start_command.extend(["--engine", config.engine.default])
+        if config.intelligence.default_model:
+            start_command.extend(["--model", config.intelligence.default_model])
+        if config.agent.default_agent:
+            start_command.extend(["--agent", config.agent.default_agent])
         server = subprocess.run(
-            [
-                uv,
-                "run",
-                "--extra",
-                "desktop",
-                "jarvis",
-                "start",
-                "--port",
-                str(api_port),
-            ],
+            start_command,
             cwd=frontend.parent,
             check=False,
         )
         if server.returncode != 0:
             raise click.ClickException("Could not start the OpenJarvis API server.")
+        console.print("Waiting for the OpenJarvis API server to become ready...")
+        if not _wait_for_api(api_port):
+            raise click.ClickException(
+                "The OpenJarvis API server did not become ready. "
+                f"Check {DEFAULT_CONFIG_DIR / 'server.log'}."
+            )
 
     env = os.environ.copy()
     # Let browser requests use Vite's same-origin proxy at any frontend port.

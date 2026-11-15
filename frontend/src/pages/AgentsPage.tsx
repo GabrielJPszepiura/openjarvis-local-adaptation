@@ -1,4 +1,5 @@
 import { useEffect, useState, useCallback, useRef } from 'react';
+import { useTranslation } from 'react-i18next';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { toast } from 'sonner';
@@ -63,8 +64,9 @@ import {
   Loader2,
 } from 'lucide-react';
 import { SOURCE_CATALOG } from '../types/connectors';
-import type { ConnectRequest } from '../types/connectors';
-import { listConnectors, connectSource } from '../lib/connectors-api';
+import type { ConnectRequest, ConnectorInfo } from '../types/connectors';
+import { listConnectors, connectSource, startServerOAuth } from '../lib/connectors-api';
+import { GenericConnectPanel } from './DataSourcesPage';
 import type { ToolCallInfo } from '../types';
 import { ToolCallCard } from '../components/Chat/ToolCallCard';
 import { getAgentSchedule, normalizeAgentSchedule } from '../lib/agent-schedule';
@@ -102,10 +104,11 @@ function StatusBadge({ status }: { status: string }) {
   const color = statusColor(status);
   return (
     <span
-      className="px-2 py-0.5 rounded-full text-xs font-medium"
+      className="notranslate px-2 py-0.5 rounded-full text-xs font-medium"
+      translate="no"
       style={{ background: color + '20', color }}
     >
-      {status.replace('_', ' ')}
+      <span>{status.replace('_', ' ')}</span>
     </span>
   );
 }
@@ -1970,7 +1973,13 @@ function InteractTab({ agentId, agentStatus, onRunStateChange }: { agentId: stri
 
 function ChannelsTab({ agentId }: { agentId: string }) {
   const [connectors, setConnectors] = useState<
-    Array<{ connector_id: string; display_name: string; connected: boolean; chunks: number }>
+    Array<{
+      connector_id: string;
+      display_name: string;
+      auth_type: ConnectorInfo['auth_type'];
+      connected: boolean;
+      chunks: number;
+    }>
   >([]);
   const [expandedId, setExpandedId] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
@@ -1985,6 +1994,7 @@ function ChannelsTab({ agentId }: { agentId: string }) {
           list.map((c) => ({
             connector_id: c.connector_id,
             display_name: c.display_name,
+            auth_type: c.auth_type,
             connected: c.connected,
             chunks: (c as any).chunks || 0,
           })),
@@ -2003,7 +2013,10 @@ function ChannelsTab({ agentId }: { agentId: string }) {
   const handleConnect = async (id: string, req: ConnectRequest) => {
     setLoading(true);
     try {
-      await connectSource(id, req);
+      const response = await connectSource(id, req);
+      if (response.status === 'oauth_required') {
+        await startServerOAuth(id, response.oauth_start);
+      }
       setExpandedId(null);
       // Poll for connection status (OAuth flow runs in background thread)
       for (let i = 0; i < 30; i++) {
@@ -2014,8 +2027,25 @@ function ChannelsTab({ agentId }: { agentId: string }) {
         const target = updated.find((c) => c.connector_id === id);
         if (target?.connected) break;
       }
-    } catch {
-      // error handling
+    } catch (err: any) {
+      toast.error('Failed to connect data source', {
+        description: err.message || 'Unknown error',
+      });
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleOAuthStart = async (id: string) => {
+    setLoading(true);
+    try {
+      await startServerOAuth(id);
+      await loadConnectors();
+      setExpandedId(null);
+    } catch (err: any) {
+      toast.error('Failed to authorize data source', {
+        description: err.message || 'Unknown error',
+      });
     } finally {
       setLoading(false);
     }
@@ -2033,7 +2063,13 @@ function ChannelsTab({ agentId }: { agentId: string }) {
     imessage: '\uD83D\uDCAC', gdrive: '\uD83D\uDCC1', notion: '\uD83D\uDCC4',
     obsidian: '\uD83D\uDCC1', granola: '\uD83C\uDF99\uFE0F', gcalendar: '\uD83D\uDCC5',
     gcontacts: '\uD83D\uDCC7', outlook: '\u2709\uFE0F', apple_notes: '\uD83C\uDF4E',
+    apple_calendar: '\uD83D\uDCC5', apple_contacts: '\uD83D\uDC65',
+    apple_health: '\u2764\uFE0F', apple_music: '\uD83C\uDFB5',
     dropbox: '\uD83D\uDCE6', whatsapp: '\uD83D\uDCF1',
+    google_tasks: '\u2705', github_notifications: '\uD83D\uDD14',
+    hackernews: '\uD83D\uDCF0', news_rss: '\uD83D\uDCF0',
+    weather: '\uD83C\uDF24\uFE0F', spotify: '\uD83C\uDFB5',
+    strava: '\uD83C\uDFC3', oura: '\uD83D\uDC8D',
   };
 
   return (
@@ -2149,6 +2185,18 @@ function ChannelsTab({ agentId }: { agentId: string }) {
                   )}
                 </div>
               )}
+              {isReconnecting && !meta?.steps && (
+                <div style={{ borderTop: '1px solid var(--color-border)', padding: 12 }}>
+                  <GenericConnectPanel
+                    connectorId={c.connector_id}
+                    displayName={c.display_name}
+                    authType={c.auth_type}
+                    loading={loading}
+                    onConnect={(req) => handleConnect(c.connector_id, req)}
+                    onOAuthStart={() => handleOAuthStart(c.connector_id)}
+                  />
+                </div>
+              )}
             </div>
             );
           })}
@@ -2262,6 +2310,21 @@ function ChannelsTab({ agentId }: { agentId: string }) {
                     }}>
                       {'\uD83D\uDD12'} Read-only access {'\u00B7'} No data leaves your device
                     </div>
+                  </div>
+                )}
+                {isExpanded && !meta?.steps && (
+                  <div style={{
+                    borderTop: '1px solid var(--color-border)',
+                    padding: 12,
+                  }}>
+                    <GenericConnectPanel
+                      connectorId={c.connector_id}
+                      displayName={c.display_name}
+                      authType={c.auth_type}
+                      loading={loading}
+                      onConnect={(req) => handleConnect(c.connector_id, req)}
+                      onOAuthStart={() => handleOAuthStart(c.connector_id)}
+                    />
                   </div>
                 )}
               </div>
@@ -3418,6 +3481,7 @@ function LogsTab({ agentId }: { agentId: string }) {
 // ---------------------------------------------------------------------------
 
 export function AgentsPage() {
+  const { t } = useTranslation();
   const managedAgents = useAppStore((s) => s.managedAgents);
   const setManagedAgents = useAppStore((s) => s.setManagedAgents);
   const selectedAgentId = useAppStore((s) => s.selectedAgentId);
@@ -3461,13 +3525,27 @@ export function AgentsPage() {
   }, [selectedAgentId]);
 
   const handlePause = async (id: string) => {
-    await pauseManagedAgent(id).catch(() => {});
-    await refresh();
+    try {
+      await pauseManagedAgent(id);
+    } catch (err: any) {
+      toast.error('Failed to pause agent', {
+        description: err.message || 'Unknown error',
+      });
+    } finally {
+      await refresh();
+    }
   };
 
   const handleResume = async (id: string) => {
-    await resumeManagedAgent(id).catch(() => {});
-    await refresh();
+    try {
+      await resumeManagedAgent(id);
+    } catch (err: any) {
+      toast.error('Failed to resume agent', {
+        description: err.message || 'Unknown error',
+      });
+    } finally {
+      await refresh();
+    }
   };
 
   const handleDelete = async (id: string) => {
@@ -3601,13 +3679,13 @@ export function AgentsPage() {
             </div>
           </div>
           {/* Header actions */}
-          <div className="flex items-center gap-2">
+          <div className="notranslate flex items-center gap-2" translate="no">
             {detailTab === 'interact' ? (
               <span
                 className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs"
                 style={{ background: 'var(--color-success)20', color: 'var(--color-success)', border: '1px solid var(--color-success)40' }}
               >
-                <MessageSquare size={13} /> Chat ready — just type below
+                <MessageSquare size={13} /> <span>Chat ready — just type below</span>
               </span>
             ) : (
               <button
@@ -3615,25 +3693,21 @@ export function AgentsPage() {
                 className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-sm cursor-pointer font-medium"
                 style={{ background: 'var(--color-accent)', color: 'var(--color-on-accent)' }}
               >
-                <Zap size={13} /> Run Now
+                <Zap size={13} /> <span>Run Now</span>
               </button>
             )}
-            {(selectedAgent.status === 'running' || selectedAgent.status === 'idle') && (
+            {(selectedAgent.status === 'running' || selectedAgent.status === 'idle' || selectedAgent.status === 'paused') && (
               <button
-                onClick={() => handlePause(selectedAgent.id)}
+                onClick={() => selectedAgent.status === 'paused'
+                  ? handleResume(selectedAgent.id)
+                  : handlePause(selectedAgent.id)}
                 className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-sm cursor-pointer"
-                style={{ background: 'var(--color-bg-secondary)', border: '1px solid var(--color-border)', color: 'var(--color-text)' }}
+                style={selectedAgent.status === 'paused'
+                  ? { background: 'var(--color-success)20', color: 'var(--color-success)', border: '1px solid var(--color-success)40' }
+                  : { background: 'var(--color-bg-secondary)', border: '1px solid var(--color-border)', color: 'var(--color-text)' }}
               >
-                <Pause size={13} /> Pause
-              </button>
-            )}
-            {selectedAgent.status === 'paused' && (
-              <button
-                onClick={() => handleResume(selectedAgent.id)}
-                className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-sm cursor-pointer"
-                style={{ background: 'var(--color-success)20', color: 'var(--color-success)', border: '1px solid var(--color-success)40' }}
-              >
-                <Play size={13} /> Resume
+                {selectedAgent.status === 'paused' ? <Play size={13} /> : <Pause size={13} />}
+                <span>{selectedAgent.status === 'paused' ? 'Resume' : 'Pause'}</span>
               </button>
             )}
             {(selectedAgent.status === 'error' || selectedAgent.status === 'stalled' || selectedAgent.status === 'needs_attention') && (
@@ -3642,7 +3716,7 @@ export function AgentsPage() {
                 className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-sm cursor-pointer"
                 style={{ background: 'var(--color-error)20', color: 'var(--color-error)', border: '1px solid var(--color-error)40' }}
               >
-                <AlertTriangle size={13} /> Recover
+                <AlertTriangle size={13} /> <span>Recover</span>
               </button>
             )}
             <button
@@ -3921,7 +3995,7 @@ export function AgentsPage() {
       <header className="mb-6">
         <div className="flex justify-between items-center">
           <h1 className="text-lg font-semibold" style={{ color: 'var(--color-text)' }}>
-            Agents
+            {t('pages.agents')}
           </h1>
           <button
             onClick={() => agentManagerAvailable && setShowWizard(true)}
@@ -3932,11 +4006,11 @@ export function AgentsPage() {
               color: agentManagerAvailable === false ? 'var(--color-text-tertiary)' : 'var(--color-on-accent)',
             }}
           >
-            <Plus size={15} /> New Agent
+            <Plus size={15} /> {t('pages.newAgent')}
           </button>
         </div>
         <p className="text-sm mt-2 max-w-2xl" style={{ color: 'var(--color-text-secondary)' }}>
-          Long-running autonomous agents that can monitor sources, run tasks on a schedule, and message you through connected channels.
+          {t('pages.agentsDescription')}
         </p>
       </header>
 
@@ -3985,7 +4059,7 @@ export function AgentsPage() {
         <div className="text-center py-16" style={{ color: 'var(--color-text-tertiary)' }}>
           <Bot size={48} className="mx-auto mb-4 opacity-30" />
           <p className="mb-2 font-medium" style={{ color: 'var(--color-text-secondary)' }}>
-            No agents yet
+            {t('pages.noAgents')}
           </p>
           <p className="text-sm mb-6">Create your first agent to get started with autonomous task management.</p>
           <button

@@ -1,4 +1,6 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
+import { useTranslation } from 'react-i18next';
+import '../lib/i18n';
 import {
   Palette,
   Globe,
@@ -18,7 +20,7 @@ import {
   Brain,
   RefreshCw,
 } from 'lucide-react';
-import { useAppStore, type ThemeMode } from '../lib/store';
+import { useAppStore, type AppLanguage, type ThemeMode } from '../lib/store';
 import {
   checkHealth,
   fetchSpeechHealth,
@@ -40,6 +42,7 @@ import { isAutoUpdateDisabled, setAutoUpdateDisabled } from '../components/Deskt
 const CLOUD_KEY_STATUS_CHANGED = 'openjarvis-cloud-key-status-changed';
 
 function OllamaModelList() {
+  const { t } = useTranslation();
   const [models, setModels] = useState<Array<{ name: string; size: number }>>([]);
   useEffect(() => {
     fetch('http://localhost:11434/api/tags')
@@ -47,7 +50,7 @@ function OllamaModelList() {
       .then(data => setModels((data.models || []).map((m: any) => ({ name: m.name, size: m.size }))))
       .catch(() => setModels([]));
   }, []);
-  if (models.length === 0) return <span className="text-xs" style={{ color: 'var(--color-text-tertiary)' }}>No models loaded</span>;
+  if (models.length === 0) return <span className="text-xs" style={{ color: 'var(--color-text-tertiary)' }}>{t('settings.noModels')}</span>;
   return (
     <div className="flex flex-wrap gap-1">
       {models.map(m => (
@@ -70,6 +73,7 @@ function ApiKeyInput({
   placeholder: string;
   toolName?: string;
 }) {
+  const { t } = useTranslation();
   const [value, setValue] = useState('');
   const [saved, setSaved] = useState(false);
   const [hasKey, setHasKey] = useState(false);
@@ -148,7 +152,7 @@ function ApiKeyInput({
         value={value}
         onChange={e => setValue(e.target.value)}
         onBlur={() => { if (value.trim()) void save(value); }}
-        placeholder={hasKey ? (desktopKeyStorage ? 'Saved in secure storage' : 'Saved by local server') : placeholder}
+        placeholder={hasKey ? (desktopKeyStorage ? t('settings.secureStorage') : t('settings.localServerStorage')) : placeholder}
         disabled={!canManage}
         className="w-48 px-2 py-1 rounded text-xs"
         style={{ background: 'var(--color-bg)', border: '1px solid var(--color-border)', color: 'var(--color-text)' }} />
@@ -161,7 +165,7 @@ function ApiKeyInput({
           Remove
         </button>
       )}
-      {saved && <span className="text-[10px]" style={{ color: 'var(--color-success)' }}>Saved</span>}
+      {saved && <span className="text-[10px]" style={{ color: 'var(--color-success)' }}>{t('common.saved')}</span>}
       {error && <span className="text-[10px]" style={{ color: 'var(--color-error)' }}>{error}</span>}
     </div>
   );
@@ -241,21 +245,22 @@ export function MemoryStatusRow({
   status: MemoryStatus;
   onRetry: () => void;
 }) {
+  const { t } = useTranslation();
   const stats = status.kind === 'ready' ? status.stats : null;
   const description = status.kind === 'error'
     ? status.message
     : status.kind === 'loading'
-      ? 'Checking memory backend...'
+      ? t('settings.checkingMemory')
       : stats?.backend === 'none'
-        ? 'Memory is not configured'
+        ? t('settings.memoryNotConfigured')
         : `${stats?.backend} backend — ${stats?.entries} entries`;
   const label = status.kind === 'loading'
-    ? 'Checking...'
+    ? t('settings.checking')
     : stats?.backend === 'none'
-      ? 'Not configured'
+      ? t('common.notConfigured')
       : stats
         ? `${stats.entries} entries`
-        : 'Unavailable';
+        : t('common.unavailable');
 
   return (
     <SettingRow label="Memory status" description={description}>
@@ -271,7 +276,7 @@ export function MemoryStatusRow({
             className="text-xs underline cursor-pointer whitespace-nowrap"
             style={{ color: 'var(--color-accent)' }}
           >
-            Retry
+            {t('common.retry')}
           </button>
         )}
       </div>
@@ -279,13 +284,14 @@ export function MemoryStatusRow({
   );
 }
 
-const themeOptions: { value: ThemeMode; label: string; icon: typeof Sun }[] = [
-  { value: 'light', label: 'Light', icon: Sun },
-  { value: 'dark', label: 'Dark', icon: Moon },
-  { value: 'system', label: 'System', icon: Monitor },
+const themeOptions: { value: ThemeMode; labelKey: string; icon: typeof Sun }[] = [
+  { value: 'light', labelKey: 'settings.light', icon: Sun },
+  { value: 'dark', labelKey: 'settings.dark', icon: Moon },
+  { value: 'system', labelKey: 'settings.system', icon: Monitor },
 ];
 
 export function SettingsPage() {
+  const { t } = useTranslation();
   const settings = useAppStore((s) => s.settings);
   const updateSettings = useAppStore((s) => s.updateSettings);
   const conversations = useAppStore((s) => s.conversations);
@@ -459,26 +465,40 @@ export function SettingsPage() {
         <header className="mb-6">
           <div className="flex items-center justify-between gap-3">
             <h1 className="text-lg font-semibold" style={{ color: 'var(--color-text)' }}>
-              Settings
+              {t('settings.title')}
             </h1>
             {saved && (
               <span className="flex items-center gap-1 text-xs px-2 py-1 rounded-full" style={{
                 background: 'var(--color-accent-subtle)',
                 color: 'var(--color-success)',
               }}>
-                <Check size={12} /> Saved
+                <Check size={12} /> {t('common.saved')}
               </span>
             )}
           </div>
           <p className="text-sm mt-2 max-w-2xl" style={{ color: 'var(--color-text-secondary)' }}>
-            App preferences — appearance, model defaults, keyboard shortcuts, and data management.
+            {t('settings.subtitle')}
           </p>
         </header>
 
         <div className="flex flex-col gap-4">
+          <Section title={t('settings.languageSection')}>
+            <SettingRow label={t('settings.language')} description={t('settings.languageDescription')}>
+              <select
+                value={settings.language}
+                onChange={(e) => { updateSettings({ language: e.target.value as AppLanguage }); showSaved(); }}
+                className="text-sm px-3 py-1.5 rounded-lg outline-none cursor-pointer"
+                style={{ background: 'var(--color-bg-secondary)', color: 'var(--color-text)', border: '1px solid var(--color-border)' }}
+              >
+                <option value="pt-BR">{t('settings.portuguese')}</option>
+                <option value="en-US">{t('settings.english')}</option>
+              </select>
+            </SettingRow>
+          </Section>
+
           {/* Appearance */}
-          <Section title="Appearance">
-            <SettingRow label="Theme" description="Choose how OpenJarvis looks">
+          <Section title={t('settings.appearance')}>
+            <SettingRow label={t('settings.theme')} description={t('settings.themeDescription')}>
               <div className="flex gap-1 p-0.5 rounded-lg" style={{ background: 'var(--color-bg-secondary)' }}>
                 {themeOptions.map((opt) => {
                   const isActive = settings.theme === opt.value;
@@ -494,13 +514,13 @@ export function SettingsPage() {
                       }}
                     >
                       <opt.icon size={14} />
-                      {opt.label}
+                      {t(opt.labelKey)}
                     </button>
                   );
                 })}
               </div>
             </SettingRow>
-            <SettingRow label="Font size">
+            <SettingRow label={t('settings.fontSize')}>
               <select
                 value={settings.fontSize}
                 onChange={(e) => { updateSettings({ fontSize: e.target.value as any }); showSaved(); }}
@@ -511,27 +531,27 @@ export function SettingsPage() {
                   border: '1px solid var(--color-border)',
                 }}
               >
-                <option value="small">Small</option>
-                <option value="default">Default</option>
-                <option value="large">Large</option>
+                <option value="small">{t('settings.small')}</option>
+                <option value="default">{t('settings.default')}</option>
+                <option value="large">{t('settings.large')}</option>
               </select>
             </SettingRow>
           </Section>
 
           {/* Connection */}
-          <Section title="Connection">
-            <SettingRow label="Server status" description={serverInfo ? `${serverInfo.engine} / ${serverInfo.model}` : 'Not connected'}>
+          <Section title={t('settings.connection')}>
+            <SettingRow label={t('settings.serverStatus')} description={serverInfo ? `${serverInfo.engine} / ${serverInfo.model}` : t('settings.notConnected')}>
               <div className="flex items-center gap-2">
                 <span
                   className="w-2 h-2 rounded-full"
                   style={{ background: healthy === true ? 'var(--color-success)' : healthy === false ? 'var(--color-error)' : 'var(--color-text-tertiary)' }}
                 />
                 <span className="text-xs" style={{ color: 'var(--color-text-secondary)' }}>
-                  {healthy === true ? 'Connected' : healthy === false ? 'Disconnected' : 'Checking...'}
+                  {healthy === true ? t('common.connected') : healthy === false ? t('common.disconnected') : t('settings.checking')}
                 </span>
               </div>
             </SettingRow>
-            <SettingRow label="API URL" description="Set if backend runs on a different port or host">
+            <SettingRow label={t('settings.apiUrl')} description={t('settings.apiUrlDescription')}>
               <input
                 type="text"
                 value={settings.apiUrl}
@@ -545,7 +565,7 @@ export function SettingsPage() {
                 }}
               />
             </SettingRow>
-            <SettingRow label="API key" description="Required only if the server was started with an API key">
+            <SettingRow label={t('settings.apiKey')} description={t('settings.apiKeyDescription')}>
               <input
                 type="password"
                 value={settings.apiKey}
@@ -563,31 +583,31 @@ export function SettingsPage() {
           </Section>
 
           {/* Inference source */}
-          <Section title="Inference source">
-            <SettingRow label="Source" description="Where the app runs models. Applies after restart.">
+          <Section title={t('settings.inferenceSource')}>
+            <SettingRow label={t('settings.source')} description={t('settings.sourceDescription')}>
               <select
                 value={srcKind}
                 onChange={(e) => { setSrcKind(e.target.value as InferenceSource['kind']); setSrcMsg(''); }}
                 className="text-sm px-3 py-1.5 rounded-lg outline-none w-56"
                 style={{ background: 'var(--color-bg-secondary)', color: 'var(--color-text)', border: '1px solid var(--color-border)' }}
               >
-                <option value="ollama">Bundled Ollama (default)</option>
-                <option value="custom">Custom OpenAI-compatible server</option>
+                <option value="ollama">{t('settings.bundledOllama')}</option>
+                <option value="custom">{t('settings.customServer')}</option>
               </select>
             </SettingRow>
             {srcKind === 'custom' && (
               <>
-                <SettingRow label="Server URL" description="e.g. LM Studio: http://localhost:1234/v1">
+                <SettingRow label={t('settings.serverUrl')} description="e.g. LM Studio: http://localhost:1234/v1">
                   <input type="text" value={customHost} onChange={(e) => { setCustomHost(e.target.value); setSrcMsg(''); }} placeholder="http://localhost:1234/v1"
                     className="text-sm px-3 py-1.5 rounded-lg outline-none w-56"
                     style={{ background: 'var(--color-bg-secondary)', color: 'var(--color-text)', border: '1px solid var(--color-border)' }} />
                 </SettingRow>
-                <SettingRow label="Model" description="Model id served by your endpoint">
+                <SettingRow label={t('settings.model')} description="Model id served by your endpoint">
                   <input type="text" value={customModel} onChange={(e) => { setCustomModel(e.target.value); setSrcMsg(''); }} placeholder="qwen2.5-7b-instruct"
                     className="text-sm px-3 py-1.5 rounded-lg outline-none w-56"
                     style={{ background: 'var(--color-bg-secondary)', color: 'var(--color-text)', border: '1px solid var(--color-border)' }} />
                 </SettingRow>
-                <SettingRow label="Server type" description="OpenAI-compatible engine">
+                <SettingRow label={t('settings.serverType')} description="OpenAI-compatible engine">
                   <select value={customEngine} onChange={(e) => { setCustomEngine(e.target.value); setSrcMsg(''); }}
                     className="text-sm px-3 py-1.5 rounded-lg outline-none w-56"
                     style={{ background: 'var(--color-bg-secondary)', color: 'var(--color-text)', border: '1px solid var(--color-border)' }}>
@@ -598,7 +618,7 @@ export function SettingsPage() {
                     <option value="mlx">MLX</option>
                   </select>
                 </SettingRow>
-                <SettingRow label="API key (optional)" description="Only if your server requires one">
+                <SettingRow label={t('settings.optionalApiKey')} description="Only if your server requires one">
                   <input type="password" value={customKey} onChange={(e) => { setCustomKey(e.target.value); setSrcMsg(''); }} placeholder="leave blank if none"
                     className="text-sm px-3 py-1.5 rounded-lg outline-none w-56"
                     style={{ background: 'var(--color-bg-secondary)', color: 'var(--color-text)', border: '1px solid var(--color-border)' }} />
@@ -615,14 +635,14 @@ export function SettingsPage() {
           </Section>
 
           {/* Models */}
-          <Section title="Models">
-            <SettingRow label="Local models (Ollama)" description="Models available for local inference">
+          <Section title={t('settings.models')}>
+            <SettingRow label={t('settings.localModels')} description={t('settings.localModelsDescription')}>
               <OllamaModelList />
             </SettingRow>
             <div className="text-xs mt-2 px-1" style={{ color: 'var(--color-text-tertiary)' }}>
               Run <code className="px-1 py-0.5 rounded text-[11px]" style={{ background: 'var(--color-bg-tertiary)' }}>ollama pull &lt;model-name&gt;</code> in your terminal to add more models
             </div>
-            <SettingRow label="Cloud providers" description="Green dot means API key is configured">
+            <SettingRow label={t('settings.cloudProviders')} description={t('settings.cloudProvidersDescription')}>
               <div className="flex flex-wrap gap-3">
                 <CloudProviderStatus label="OpenAI" keyName="OPENAI_API_KEY" />
                 <CloudProviderStatus label="Anthropic" keyName="ANTHROPIC_API_KEY" />
@@ -634,7 +654,7 @@ export function SettingsPage() {
           </Section>
 
           {/* API Keys */}
-          <Section title="API Keys">
+          <Section title={t('settings.apiKeys')}>
             <SettingRow label="OpenAI" description="GPT-4, GPT-3.5, etc.">
               <ApiKeyInput keyName="OPENAI_API_KEY" placeholder="sk-..." />
             </SettingRow>
@@ -653,16 +673,16 @@ export function SettingsPage() {
           </Section>
 
           {/* Tools */}
-          <Section title="Tools">
-            <SettingRow label="Web Search" description="Tavily key for web search tool">
+          <Section title={t('settings.tools')}>
+            <SettingRow label={t('settings.webSearch')} description="Tavily key for web search tool">
               <ApiKeyInput keyName="TAVILY_API_KEY" placeholder="tvly-..." toolName="web_search" />
             </SettingRow>
           </Section>
 
           {/* Memory */}
-          <Section title="Memory">
+          <Section title={t('settings.memory')}>
             <MemoryStatusRow status={memoryStatus} onRetry={() => { void refreshMemoryStatus(); }} />
-            <SettingRow label="Use memory context" description="Automatically inject relevant memories into conversations">
+            <SettingRow label={t('settings.useMemory')} description={t('settings.useMemoryDescription')}>
               <button
                 onClick={() => {
                   const next = !memoryEnabled;
@@ -684,7 +704,7 @@ export function SettingsPage() {
                 />
               </button>
             </SettingRow>
-            <SettingRow label="Memory backend" description="Which retrieval engine to use">
+            <SettingRow label={t('settings.memoryBackend')} description={t('settings.memoryBackendDescription')}>
               <select
                 value={memoryBackend}
                 onChange={(e) => {
@@ -706,7 +726,7 @@ export function SettingsPage() {
                 <option value="hybrid">hybrid</option>
               </select>
             </SettingRow>
-            <SettingRow label="Results to inject" description={`${memoryTopK}`}>
+            <SettingRow label={t('settings.resultsToInject')} description={`${memoryTopK}`}>
               <input
                 type="range"
                 min="1"
@@ -722,7 +742,7 @@ export function SettingsPage() {
                 className="w-32 cursor-pointer accent-[var(--color-accent)]"
               />
             </SettingRow>
-            <SettingRow label="Min relevance score" description={`${memoryMinScore}`}>
+            <SettingRow label={t('settings.minRelevance')} description={`${memoryMinScore}`}>
               <input
                 type="range"
                 min="0"
@@ -738,7 +758,7 @@ export function SettingsPage() {
                 className="w-32 cursor-pointer accent-[var(--color-accent)]"
               />
             </SettingRow>
-            <SettingRow label="Max context tokens" description={`${memoryMaxTokens}`}>
+            <SettingRow label={t('settings.maxContextTokens')} description={`${memoryMaxTokens}`}>
               <input
                 type="range"
                 min="256"
@@ -757,8 +777,8 @@ export function SettingsPage() {
           </Section>
 
           {/* Model defaults */}
-          <Section title="Model Defaults">
-            <SettingRow label="Temperature" description={`${settings.temperature}`}>
+          <Section title={t('settings.modelDefaults')}>
+            <SettingRow label={t('settings.temperature')} description={`${settings.temperature}`}>
               <input
                 type="range"
                 min="0"
@@ -769,7 +789,7 @@ export function SettingsPage() {
                 className="w-32 cursor-pointer accent-[var(--color-accent)]"
               />
             </SettingRow>
-            <SettingRow label="Max tokens" description={`${settings.maxTokens}`}>
+            <SettingRow label={t('settings.maxTokens')} description={`${settings.maxTokens}`}>
               <input
                 type="range"
                 min="256"
@@ -783,8 +803,8 @@ export function SettingsPage() {
           </Section>
 
           {/* Speech */}
-          <Section title="Speech">
-            <SettingRow label="Speech-to-Text" description="Enable microphone input for voice dictation">
+          <Section title={t('settings.speech')}>
+            <SettingRow label={t('settings.speechToText')} description={t('settings.speechToTextDescription')}>
               <button
                 onClick={() => { updateSettings({ speechEnabled: !settings.speechEnabled }); showSaved(); }}
                 className="relative w-11 h-6 rounded-full transition-colors cursor-pointer"
@@ -801,7 +821,7 @@ export function SettingsPage() {
                 />
               </button>
             </SettingRow>
-            <SettingRow label="Text-to-Speech" description="Show a read-aloud button on assistant replies">
+            <SettingRow label={t('settings.textToSpeech')} description={t('settings.textToSpeechDescription')}>
               <button
                 onClick={() => { updateSettings({ voiceOutputEnabled: !settings.voiceOutputEnabled }); showSaved(); }}
                 className="relative w-11 h-6 rounded-full transition-colors cursor-pointer"
@@ -818,7 +838,7 @@ export function SettingsPage() {
                 />
               </button>
             </SettingRow>
-            <SettingRow label="Speak replies automatically" description="Read every assistant reply aloud as soon as it finishes">
+            <SettingRow label={t('settings.autoSpeak')} description={t('settings.autoSpeakDescription')}>
               <button
                 onClick={() => { updateSettings({ voiceAutoplay: !settings.voiceAutoplay }); showSaved(); }}
                 disabled={!settings.voiceOutputEnabled}
@@ -838,7 +858,7 @@ export function SettingsPage() {
                 />
               </button>
             </SettingRow>
-            <SettingRow label="Voice" description="Backend and voice used for spoken replies">
+            <SettingRow label={t('settings.voice')} description="Backend and voice used for spoken replies">
               <div className="flex items-center gap-2">
                 <span
                   className="w-2 h-2 rounded-full"
@@ -847,13 +867,13 @@ export function SettingsPage() {
                   }}
                 />
                 <span className="text-xs" style={{ color: 'var(--color-text-secondary)' }}>
-                  {ttsBackend === null ? 'Checking...'
+                  {ttsBackend === null ? t('settings.checking')
                     : ttsBackend.available ? `${ttsBackend.backend}${ttsBackend.voice_id ? ` / ${ttsBackend.voice_id}` : ''}`
                     : 'Not configured'}
                 </span>
               </div>
             </SettingRow>
-            <SettingRow label="Backend status" description="Requires Whisper, Deepgram, or another speech backend">
+            <SettingRow label={t('settings.backendStatus')} description="Requires Whisper, Deepgram, or another speech backend">
               <div className="flex items-center gap-2">
                 <span
                   className="w-2 h-2 rounded-full"
@@ -864,7 +884,7 @@ export function SettingsPage() {
                   }}
                 />
                 <span className="text-xs" style={{ color: 'var(--color-text-secondary)' }}>
-                  {speechBackendAvailable === null ? 'Checking...'
+                  {speechBackendAvailable === null ? t('settings.checking')
                     : speechBackendAvailable ? 'Available'
                     : 'Not configured'}
                 </span>
@@ -879,8 +899,8 @@ export function SettingsPage() {
           </Section>
 
           {/* Data */}
-          <Section title="Data">
-            <SettingRow label="Conversations" description={`${conversations.length} stored locally`}>
+          <Section title={t('settings.data')}>
+            <SettingRow label={t('settings.conversations')} description={`${conversations.length} stored locally`}>
               <div className="flex gap-2">
                 <button
                   onClick={handleExport}
@@ -902,7 +922,7 @@ export function SettingsPage() {
                 </button>
               </div>
             </SettingRow>
-            <SettingRow label="Clear all data" description="Permanently delete all conversations">
+            <SettingRow label={t('settings.clearAllData')} description={t('settings.clearAllDataDescription')}>
               <button
                 onClick={handleClear}
                 className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium transition-colors cursor-pointer"
@@ -920,8 +940,8 @@ export function SettingsPage() {
           </Section>
 
           {/* Updates */}
-          <Section title="Updates">
-            <SettingRow label="Auto-update" description="Check for new desktop builds automatically every 30 minutes">
+          <Section title={t('settings.updates')}>
+            <SettingRow label={t('settings.autoUpdate')} description={t('settings.autoUpdateDescription')}>
               <button
                 onClick={() => handleAutoUpdateToggle(!autoUpdateEnabled)}
                 className="relative inline-flex h-5 w-9 items-center rounded-full transition-colors"
@@ -936,7 +956,7 @@ export function SettingsPage() {
                 />
               </button>
             </SettingRow>
-            <SettingRow label="Check for updates" description="Manually check for a new version right now">
+            <SettingRow label={t('settings.checkUpdates')} description={t('settings.checkUpdatesDescription')}>
               <button
                 onClick={handleCheckNow}
                 className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium transition-colors"
@@ -953,7 +973,7 @@ export function SettingsPage() {
           </Section>
 
           {/* About */}
-          <Section title="About">
+          <Section title={t('settings.about')}>
             <div className="text-sm" style={{ color: 'var(--color-text-secondary)' }}>
               <p className="mb-2">
                 <span className="font-semibold" style={{ color: 'var(--color-text)' }}>OpenJarvis</span> — Programming abstractions for on-device AI.

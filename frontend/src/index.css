@@ -293,6 +293,39 @@
     margin-bottom: 0;
   }
 
+  /* Chat answers need more breathing room than dense documentation prose.
+     This also makes the model's bold-label paragraphs readable when it did
+     not emit a full Markdown heading. */
+  .prose.chat-response {
+    line-height: 1.7;
+  }
+
+  .prose.chat-response p {
+    margin-bottom: 1.1em;
+  }
+
+  .prose.chat-response p + p {
+    margin-top: 1.1em;
+  }
+
+  .prose.chat-response ul,
+  .prose.chat-response ol {
+    margin-top: 1em;
+    margin-bottom: 1.2em;
+  }
+
+  .prose.chat-response li + li {
+    margin-top: 0.45em;
+  }
+
+  .prose.chat-response h1,
+  .prose.chat-response h2,
+  .prose.chat-response h3,
+  .prose.chat-response h4 {
+    margin-top: 1.45em;
+    margin-bottom: 0.7em;
+  }
+
   .prose code:not(pre code) {
     background: var(--color-code-bg);
     padding: 0.15em 0.35em;

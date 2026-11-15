@@ -26,7 +26,7 @@ def test_executor_records_trace(tmp_path):
             {
                 "agent": agent_dict["id"],
                 "tool": "web_search",
-                "args": {"query": "test"},
+                "arguments": {"query": "test"},
             },
         )
         bus.publish(
@@ -35,7 +35,8 @@ def test_executor_records_trace(tmp_path):
                 "agent": agent_dict["id"],
                 "tool": "web_search",
                 "result": "search results...",
-                "duration": 0.5,
+                "success": True,
+                "latency": 0.5,
             },
         )
         return AgentResult(content="found it", metadata={"tokens_used": 100})
@@ -50,8 +51,12 @@ def test_executor_records_trace(tmp_path):
     assert len(traces[0].steps) == 1
     assert traces[0].steps[0].step_type.value == "tool_call"
     assert traces[0].steps[0].input["tool"] == "web_search"
-    assert traces[0].total_latency_seconds > 0
-
+    assert traces[0].steps[0].input["arguments"] == {"query": "test"}
+    assert traces[0].steps[0].output == {
+        "success": True,
+        "result": "search results...",
+    }
+    assert traces[0].steps[0].duration_seconds == 0.5
     mgr.close()
     trace_store.close()
 

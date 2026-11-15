@@ -386,3 +386,37 @@ class TestTraceRoutes:
         client = TestClient(_make_app())
         resp = client.get("/v1/traces")
         assert resp.status_code == 200
+
+    def test_trace_steps_use_dashboard_contract(self):
+        from openjarvis.core.types import StepType, Trace, TraceStep
+        from openjarvis.server.api_routes import _serialise_trace
+
+        trace = Trace(
+            query="Research a topic",
+            total_latency_seconds=0.125,
+            steps=[
+                TraceStep(
+                    step_type=StepType.TOOL_CALL,
+                    timestamp=1.0,
+                    duration_seconds=0.125,
+                    input={"tool": "web_search", "arguments": {"query": "topic"}},
+                    output={"success": True, "result": "found"},
+                    metadata={"source": "test"},
+                )
+            ],
+        )
+
+        payload = _serialise_trace(trace)
+        step = payload["steps"][0]
+
+        assert payload["duration_ms"] == 125
+        assert step["step_type"] == "tool_call"
+        assert step["duration_ms"] == 125
+        assert step["data"] == {
+            "input": {"tool": "web_search", "arguments": {"query": "topic"}},
+            "output": {"success": True, "result": "found"},
+            "metadata": {"source": "test"},
+        }
+        assert "duration_seconds" not in step
+        assert "input" not in step
+        assert "output" not in step

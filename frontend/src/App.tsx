@@ -17,6 +17,7 @@ import { OptInModal } from './components/OptInModal';
 import { UpdateChecker } from './components/Desktop/UpdateChecker';
 import { track, hashId } from './lib/analytics';
 import { offerAnalyticsChoice } from './lib/analytics-invitation';
+import i18n from './lib/i18n';
 
 export default function App() {
   const [setupDone, setSetupDone] = useState(!isTauri());
@@ -55,6 +56,13 @@ export default function App() {
     if (settings.theme === 'dark') root.classList.add('dark');
     else if (settings.theme === 'light') root.classList.add('light');
   }, [settings.theme]);
+
+  // Keep the UI language, document metadata, and saved preference in sync.
+  useEffect(() => {
+    void i18n.changeLanguage(settings.language);
+    document.documentElement.lang = settings.language;
+    localStorage.setItem('openjarvis-language', settings.language);
+  }, [settings.language]);
 
   // Sync overlay conversations into the main app
   const importOverlay = useAppStore((s) => s.importOverlayConversation);

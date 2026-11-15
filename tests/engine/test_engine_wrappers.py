@@ -8,7 +8,8 @@ from typing import Any, Dict, List
 
 import pytest
 
-from openjarvis.core.events import EventBus
+from openjarvis.agents.orchestrator import OrchestratorAgent
+from openjarvis.core.events import EventBus, EventType
 from openjarvis.core.types import Message, Role
 from openjarvis.engine._stubs import InferenceEngine, StreamChunk
 from openjarvis.engine.multi import MultiEngine
@@ -143,3 +144,17 @@ async def test_multi_routes_stream_full_by_model():
         result_b.append(chunk)
 
     assert result_b[0].content == "from B"
+
+
+def test_multi_engine_does_not_duplicate_instrumented_inference_events():
+    """The router must expose that its selected engine already emits events."""
+    bus = EventBus(record_history=True)
+    inner = _FakeStreamFullEngine([])
+    wrapped = InstrumentedEngine(inner, bus)
+    multi = MultiEngine([("local", wrapped)])
+    agent = OrchestratorAgent(multi, "fake-model", bus=bus)
+
+    agent.run("Olá")
+
+    assert sum(e.event_type == EventType.INFERENCE_START for e in bus.history) == 1
+    assert sum(e.event_type == EventType.INFERENCE_END for e in bus.history) == 1

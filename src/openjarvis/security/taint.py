@@ -56,6 +56,8 @@ SINK_POLICY: Dict[str, Set[TaintLabel]] = {
     "code_interpreter": {TaintLabel.SECRET},
     # File writes can stage data for later exfiltration; block secrets.
     "file_write": {TaintLabel.SECRET},
+    "create_document": {TaintLabel.SECRET},
+    "create_spreadsheet": {TaintLabel.SECRET},
 }
 
 # Patterns for auto-detecting taint in text

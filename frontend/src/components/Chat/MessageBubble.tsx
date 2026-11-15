@@ -5,15 +5,16 @@ import rehypeKatex from 'rehype-katex';
 import remarkGfm from 'remark-gfm';
 import remarkMath from 'remark-math';
 import 'katex/dist/katex.min.css';
-import { Copy, Check } from 'lucide-react';
+import { Check, Copy, Download, FileText } from 'lucide-react';
 import { AudioPlayer } from './AudioPlayer';
-import { ToolCallCard } from './ToolCallCard';
 import { ResearchTimeline } from './ResearchTimeline';
 import { rehypeCitations } from '../../lib/rehype-citations';
 import { XRayFooter } from './XRayFooter';
 import { SpeakMessageButton } from './SpeakMessageButton';
 import type { ChatMessage } from '../../types';
 import { stripThinkTags } from '../../lib/message-text';
+import { escapeCurrencyDollars } from '../../lib/markdown-currency';
+import { downloadGeneratedFile } from '../../lib/api';
 
 interface Props {
   message: ChatMessage;
@@ -100,6 +101,10 @@ export function MessageBubble({ message, isLive = false }: Props) {
   const isUser = message.role === 'user';
 
   const cleanContent = useMemo(() => stripThinkTags(message.content), [message.content]);
+  const markdownContent = useMemo(
+    () => escapeCurrencyDollars(cleanContent),
+    [cleanContent],
+  );
 
   // Build a ref→source lookup once per render. Memoized so the rehype plugin
   // identity stays stable until the source list actually changes.
@@ -130,7 +135,22 @@ export function MessageBubble({ message, isLive = false }: Props) {
             wordBreak: 'break-word',
           }}
         >
-          {message.content}
+          {message.attachments && message.attachments.length > 0 && (
+            <div className="mb-2 flex flex-wrap gap-1.5">
+              {message.attachments.map((attachment, index) => (
+                <span
+                  key={`${attachment.name}-${index}`}
+                  className="inline-flex max-w-full items-center gap-1 rounded-md px-2 py-1 text-[11px]"
+                  style={{ background: 'color-mix(in srgb, var(--color-user-bubble-text) 10%, transparent)' }}
+                  title={attachment.name}
+                >
+                  <FileText size={12} />
+                  <span className="max-w-48 truncate">{attachment.name}</span>
+                </span>
+              ))}
+            </div>
+          )}
+          <div>{message.content}</div>
         </div>
       </div>
     );
@@ -147,21 +167,12 @@ export function MessageBubble({ message, isLive = false }: Props) {
         />
       )}
 
-      {/* Tool calls */}
-      {message.toolCalls && message.toolCalls.length > 0 && (
-        <div className="mb-3 flex flex-col gap-2">
-          {message.toolCalls.map((tc) => (
-            <ToolCallCard key={tc.id} toolCall={tc} />
-          ))}
-        </div>
-      )}
-
       {/* Audio player (e.g. morning digest) */}
       {message.audio?.url && <AudioPlayer src={message.audio.url} />}
 
       {/* Assistant message */}
       {cleanContent && (
-        <div className="prose max-w-none">
+        <div className="prose chat-response max-w-none">
           <ReactMarkdown
             remarkPlugins={[remarkGfm, remarkMath]}
             rehypePlugins={rehypePlugins}
@@ -169,8 +180,36 @@ export function MessageBubble({ message, isLive = false }: Props) {
               pre: CodeBlockPre,
             }}
           >
-            {cleanContent}
+            {markdownContent}
           </ReactMarkdown>
+        </div>
+      )}
+
+      {message.generatedFiles && message.generatedFiles.length > 0 && (
+        <div className="mt-3 flex flex-col gap-2">
+          {message.generatedFiles.map((file) => (
+            <button
+              key={file.download_url}
+              type="button"
+              onClick={() => void downloadGeneratedFile(file)}
+              className="flex w-full max-w-md items-center gap-3 rounded-xl border px-4 py-3 text-left transition-colors cursor-pointer"
+              style={{
+                background: 'var(--color-bg-secondary)',
+                borderColor: 'var(--color-border)',
+                color: 'var(--color-text-primary)',
+              }}
+              title={file.filename}
+            >
+              <FileText size={20} style={{ color: 'var(--color-accent)' }} />
+              <span className="min-w-0 flex-1">
+                <span className="block truncate text-sm font-medium">{file.filename}</span>
+                <span className="block text-xs" style={{ color: 'var(--color-text-tertiary)' }}>
+                  {file.format.toUpperCase()} · {Math.max(1, Math.round(file.size_bytes / 1024))} KB
+                </span>
+              </span>
+              <Download size={18} style={{ color: 'var(--color-accent)' }} />
+            </button>
+          ))}
         </div>
       )}
 

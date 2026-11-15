@@ -51,6 +51,29 @@ class TestSimpleAgent:
         assert messages[0].role == Role.SYSTEM
         assert messages[1].role == Role.USER
 
+    def test_source_request_asks_for_short_source_summaries(self):
+        engine = _make_mock_engine()
+        agent = SimpleAgent(engine, "test-model")
+
+        agent.run("Agora mostre as fontes usadas na resposta anterior.")
+
+        call_args = engine.generate.call_args
+        messages = call_args[1].get("messages") or call_args[0][0]
+        prompt = messages[-1].content
+        assert "<source_presentation>" in prompt
+        assert "resumo curto" in prompt
+        assert "fonte secundária ou comercial" in prompt
+
+    def test_ordinary_request_does_not_add_source_presentation_instruction(self):
+        engine = _make_mock_engine()
+        agent = SimpleAgent(engine, "test-model")
+
+        agent.run("Explique como funciona o transporte no Japão.")
+
+        call_args = engine.generate.call_args
+        messages = call_args[1].get("messages") or call_args[0][0]
+        assert "<source_presentation>" not in messages[-1].content
+
     def test_without_context(self):
         engine = _make_mock_engine()
         agent = SimpleAgent(engine, "test-model")

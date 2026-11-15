@@ -28,6 +28,10 @@ export async function* streamChat(
   const reader = response.body!.getReader();
   const decoder = new TextDecoder();
   let buffer = '';
+  // An SSE event name applies until the following data field. Network reads
+  // are allowed to split those two lines into separate chunks, so this state
+  // must survive across reader.read() iterations.
+  let currentEvent: string | undefined;
 
   try {
     while (true) {
@@ -37,8 +41,6 @@ export async function* streamChat(
       buffer += decoder.decode(value, { stream: true });
       const lines = buffer.split('\n');
       buffer = lines.pop() || '';
-
-      let currentEvent: string | undefined;
 
       for (const line of lines) {
         if (line.startsWith('event: ')) {

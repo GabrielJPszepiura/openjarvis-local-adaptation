@@ -11,10 +11,13 @@ import pytest
 pytest.importorskip("fastapi")
 
 from openjarvis.agents._stubs import AgentResult  # noqa: E402
-from openjarvis.core.events import EventBus  # noqa: E402
+from openjarvis.core.events import EventBus, EventType  # noqa: E402
 from openjarvis.core.types import ToolResult  # noqa: E402
 from openjarvis.server.models import ChatCompletionRequest  # noqa: E402
-from openjarvis.server.stream_bridge import AgentStreamBridge  # noqa: E402
+from openjarvis.server.stream_bridge import (  # noqa: E402
+    _EVENT_MAP,
+    AgentStreamBridge,
+)
 
 
 def _streamed_content(events: list[str]) -> str:
@@ -90,3 +93,18 @@ def test_tool_call_start_preserves_already_serialized_arguments():
     payload = json.loads(event.split("data: ", 1)[1])
 
     assert payload["arguments"] == '{"query":"python"}'
+
+
+def test_agent_status_is_streamed_as_named_sse_event():
+    assert _EVENT_MAP[EventType.AGENT_STATUS] == "agent_status"
+    bridge = object.__new__(AgentStreamBridge)
+    status_event = bridge._format_named_event(
+        _EVENT_MAP[EventType.AGENT_STATUS],
+        {"stage": "attachments", "message": "Analisando 2 arquivos…"},
+    )
+    assert status_event.startswith("event: agent_status\n")
+    payload = json.loads(status_event.split("data: ", 1)[1])
+    assert payload == {
+        "stage": "attachments",
+        "message": "Analisando 2 arquivos…",
+    }

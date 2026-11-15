@@ -1,5 +1,6 @@
 // Must stay the first import: fills in crypto.randomUUID before any module uses it.
 import './lib/polyfills';
+import './lib/i18n';
 import { StrictMode } from 'react';
 import { createRoot } from 'react-dom/client';
 import { BrowserRouter } from 'react-router';

@@ -28,6 +28,7 @@ from openjarvis.server.models import (
 # EventTypes we subscribe to and their corresponding SSE event names
 _EVENT_MAP = {
     EventType.AGENT_TURN_START: "agent_turn_start",
+    EventType.AGENT_STATUS: "agent_status",
     EventType.INFERENCE_START: "inference_start",
     EventType.INFERENCE_END: "inference_end",
     EventType.TOOL_CALL_START: "tool_call_start",

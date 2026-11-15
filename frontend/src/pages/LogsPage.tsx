@@ -1,4 +1,5 @@
 import { useRef, useEffect } from 'react';
+import { useTranslation } from 'react-i18next';
 import { Copy, Trash2 } from 'lucide-react';
 import { useAppStore } from '../lib/store';
 
@@ -8,12 +9,13 @@ const LEVEL_COLORS: Record<string, string> = {
   error: 'var(--color-error)',
 };
 
-function formatTime(ts: number): string {
+function formatTime(ts: number, locale: string): string {
   const d = new Date(ts);
-  return d.toLocaleTimeString('en-US', { hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit' });
+  return d.toLocaleTimeString(locale, { hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit' });
 }
 
 export function LogsPage() {
+  const { t, i18n } = useTranslation();
   const logEntries = useAppStore((s) => s.logEntries);
   const clearLogs = useAppStore((s) => s.clearLogs);
   const bottomRef = useRef<HTMLDivElement>(null);
@@ -24,7 +26,7 @@ export function LogsPage() {
 
   const handleCopy = async () => {
     const text = logEntries
-      .map((e) => `${formatTime(e.timestamp)} [${e.level}] [${e.category}] ${e.message}`)
+      .map((e) => `${formatTime(e.timestamp, i18n.language)} [${e.level}] [${e.category}] ${e.message}`)
       .join('\n');
     await navigator.clipboard.writeText(text);
   };
@@ -35,30 +37,30 @@ export function LogsPage() {
         <header className="mb-6 shrink-0">
           <div className="flex items-center justify-between gap-3">
             <h1 className="text-lg font-semibold" style={{ color: 'var(--color-text)' }}>
-              Logs
+              {t('logs.title')}
             </h1>
             <div className="flex items-center gap-2">
               <span className="text-xs" style={{ color: 'var(--color-text-tertiary)' }}>
-                {logEntries.length} entries
+                {t('logs.entries', { count: logEntries.length })}
               </span>
               <button
                 onClick={handleCopy}
                 className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium transition-colors cursor-pointer"
                 style={{ background: 'var(--color-bg-secondary)', color: 'var(--color-text-secondary)', border: '1px solid var(--color-border)' }}
               >
-                <Copy size={12} /> Copy All
+                <Copy size={12} /> {t('common.copyAll')}
               </button>
               <button
                 onClick={clearLogs}
                 className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium transition-colors cursor-pointer"
                 style={{ background: 'var(--color-bg-secondary)', color: 'var(--color-text-secondary)', border: '1px solid var(--color-border)' }}
               >
-                <Trash2 size={12} /> Clear
+                <Trash2 size={12} /> {t('common.clear')}
               </button>
             </div>
           </div>
           <p className="text-sm mt-2 max-w-2xl" style={{ color: 'var(--color-text-secondary)' }}>
-            Recent activity — chat events, model switches, tool calls, and system messages from this session.
+            {t('logs.description')}
           </p>
         </header>
 
@@ -69,12 +71,12 @@ export function LogsPage() {
         >
           {logEntries.length === 0 ? (
             <div className="text-center py-12" style={{ color: 'var(--color-text-tertiary)' }}>
-              No log entries yet. Logs appear as you chat, switch models, and interact with the app.
+              {t('logs.empty')}
             </div>
           ) : (
             logEntries.map((entry, i) => (
               <div key={i} className="py-0.5">
-                <span style={{ color: 'var(--color-text-tertiary)' }}>{formatTime(entry.timestamp)}</span>
+                <span style={{ color: 'var(--color-text-tertiary)' }}>{formatTime(entry.timestamp, i18n.language)}</span>
                 {' '}
                 <span style={{ color: LEVEL_COLORS[entry.level] || 'var(--color-text)' }}>
                   [{entry.category}]

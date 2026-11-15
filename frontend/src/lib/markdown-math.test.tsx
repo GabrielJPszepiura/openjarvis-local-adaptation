@@ -3,6 +3,7 @@ import ReactMarkdown from 'react-markdown';
 import rehypeKatex from 'rehype-katex';
 import remarkMath from 'remark-math';
 import { describe, expect, it } from 'vitest';
+import { escapeCurrencyDollars } from './markdown-currency';
 
 function renderMath(markdown: string) {
   return renderToStaticMarkup(
@@ -25,5 +26,15 @@ describe('patched KaTeX with the Markdown plugins', () => {
     const html = renderMath('$\\href{javascript:alert(1)}{click}$');
     expect(html).not.toContain('href="javascript:');
     expect(html).not.toContain('<a ');
+  });
+
+  it('renders currency markers literally without disabling equations', () => {
+    const html = renderMath(
+      escapeCurrencyDollars('De R$ 5.000 a US$ 20.000; fórmula $x^2$.'),
+    );
+
+    expect(html).toContain('R$ 5.000');
+    expect(html).toContain('US$ 20.000');
+    expect(html).toContain('class="katex"');
   });
 });

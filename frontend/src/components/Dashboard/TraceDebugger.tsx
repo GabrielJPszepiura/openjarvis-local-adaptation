@@ -11,16 +11,16 @@ interface TraceStepData {
 }
 
 interface TraceStep {
-  step_type: string;
-  duration_ms: number;
-  data: TraceStepData;
+  step_type?: string | null;
+  duration_ms?: number | null;
+  data?: TraceStepData | null;
 }
 
 interface TraceSummary {
   id: string;
-  query: string;
-  steps: TraceStep[];
-  created_at: string;
+  query?: string | null;
+  steps?: Array<TraceStep | null> | null;
+  created_at?: string | null;
 }
 
 const STEP_COLORS: Record<string, string> = {
@@ -44,8 +44,25 @@ function StepBadge({ type }: { type: string }) {
   );
 }
 
+function traceSteps(trace: TraceSummary): TraceStep[] {
+  return Array.isArray(trace.steps)
+    ? trace.steps.filter((step): step is TraceStep => step != null)
+    : [];
+}
+
+function durationMs(value: number | null | undefined): number {
+  return typeof value === 'number' && Number.isFinite(value) ? value : 0;
+}
+
+function traceTime(value: string | null | undefined): string {
+  if (!value) return 'Time unavailable';
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? 'Time unavailable' : date.toLocaleTimeString();
+}
+
 function TraceCard({ trace, isActive, onClick }: { trace: TraceSummary; isActive: boolean; onClick: () => void }) {
-  const totalMs = trace.steps.reduce((sum, s) => sum + s.duration_ms, 0);
+  const steps = traceSteps(trace);
+  const totalMs = steps.reduce((sum, step) => sum + durationMs(step.duration_ms), 0);
 
   return (
     <button
@@ -62,19 +79,23 @@ function TraceCard({ trace, isActive, onClick }: { trace: TraceSummary; isActive
         {trace.query || 'Untitled query'}
       </div>
       <div className="flex items-center gap-2 text-[11px]" style={{ color: 'var(--color-text-tertiary)' }}>
-        <span>{trace.steps.length} steps</span>
+        <span>{steps.length} steps</span>
         <span>&middot;</span>
         <span>{totalMs.toFixed(0)}ms</span>
         <span>&middot;</span>
-        <span>{new Date(trace.created_at).toLocaleTimeString()}</span>
+        <span>{traceTime(trace.created_at)}</span>
       </div>
     </button>
   );
 }
 
-function StepDetail({ step, index }: { step: TraceStep; index: number }) {
+export function StepDetail({ step, index }: { step: TraceStep; index: number }) {
   const [expanded, setExpanded] = useState(false);
-  const dataEntries = Object.entries(step.data).filter(([_, v]) => v != null);
+  // Older traces can omit data and duration fields. Treat them as empty
+  // rather than crashing the entire dashboard with Object.entries(null).
+  const dataEntries = Object.entries(step.data ?? {}).filter(([_, v]) => v != null);
+  const type = step.step_type || 'unknown';
+  const elapsed = durationMs(step.duration_ms);
 
   return (
     <div
@@ -92,11 +113,11 @@ function StepDetail({ step, index }: { step: TraceStep; index: number }) {
         <span className="text-xs font-mono" style={{ color: 'var(--color-text-tertiary)' }}>
           {index + 1}
         </span>
-        <StepBadge type={step.step_type} />
+        <StepBadge type={type} />
         <span className="flex-1" />
         <span className="text-xs font-mono flex items-center gap-1" style={{ color: 'var(--color-text-tertiary)' }}>
           <Clock size={10} />
-          {step.duration_ms.toFixed(0)}ms
+          {elapsed.toFixed(0)}ms
         </span>
       </button>
       {expanded && dataEntries.length > 0 && (
@@ -187,7 +208,7 @@ export function TraceDebugger() {
                 <div className="text-sm font-medium mb-2" style={{ color: 'var(--color-text)' }}>
                   {selected.query}
                 </div>
-                {selected.steps.map((step, i) => (
+                {traceSteps(selected).map((step, i) => (
                   <StepDetail key={i} step={step} index={i} />
                 ))}
               </div>

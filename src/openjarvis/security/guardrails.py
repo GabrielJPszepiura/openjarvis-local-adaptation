@@ -314,6 +314,11 @@ class GuardrailsEngine(InferenceEngine):
                         },
                     )
 
+    def model_capabilities(self, model: str) -> list[str] | None:
+        """Delegate optional model capability discovery to the inner engine."""
+        resolver = getattr(self._engine, "model_capabilities", None)
+        return resolver(model) if callable(resolver) else None
+
     def list_models(self) -> List[str]:
         """Delegate to wrapped engine."""
         return self._engine.list_models()
