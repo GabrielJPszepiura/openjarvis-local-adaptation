@@ -1104,6 +1104,34 @@ def _chat_format_instruction(input_text: str) -> str:
     )
 
 
+def _choice_follow_up_instruction(input_text: str) -> str:
+    """Keep a contextual choice focused on one recommendation.
+
+    Research remains useful for a follow-up choice, but the answer should make
+    a decision rather than repeat the full catalogue from the preceding turn.
+    """
+    text = _plain_text(input_text)
+    asks_to_choose = bool(
+        re.search(r"\b(?:entre|dentre)\b", text)
+        and re.search(
+            r"\b(?:qual|melhor|indicaria|recomenda|escolhe|escolher)\b", text
+        )
+    )
+    if not asks_to_choose:
+        return ""
+    return (
+        "\n<choice_follow_up>\n"
+        "Esta é uma escolha entre opções já apresentadas na conversa. Use a "
+        "pesquisa para reforçar a decisão, mas não repita a apresentação "
+        "completa de todas as opções. Comece escolhendo claramente uma única "
+        "opção. Desenvolva mais essa escolhida com os detalhes novos e úteis "
+        "para o critério do usuário. Depois, explique de forma breve por que "
+        "as demais ficaram atrás. Só faça uma comparação longa se o usuário "
+        "pedir explicitamente uma comparação detalhada.\n"
+        "</choice_follow_up>"
+    )
+
+
 def _web_grounded_input(
     input_text: str,
     search_result: str,
@@ -1474,6 +1502,7 @@ class OrchestratorAgent(ToolUsingAgent):
         analysis_input = (
             input if creation_requested else _chat_format_instruction(input)
         )
+        analysis_input += _choice_follow_up_instruction(decision.instruction)
         if creation_requested and requested_format is not None:
             if documents:
                 self._emit_status(
@@ -1580,7 +1609,7 @@ class OrchestratorAgent(ToolUsingAgent):
                 # We still used context above to resolve a reference such as
                 # "desses países", but historical chat claims must not compete
                 # with the retrieved sources during generation.
-                None if documents or decision.web_requested else context,
+                None if documents or evidence_research_requested else context,
                 disabled_tool_names=disabled_tools,
                 generation_max_tokens=(
                     max(self._max_tokens, self._artifact_segment_max_tokens)

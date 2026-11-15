@@ -42,6 +42,20 @@ def test_create_pdf_document(tmp_path: Path) -> None:
     assert output.read_bytes().startswith(b"%PDF")
 
 
+def test_replaces_generic_timestamp_filename_with_document_subject(tmp_path: Path) -> None:
+    pytest.importorskip("docx")
+    result = CreateDocumentTool([str(tmp_path)]).execute(
+        filename="resumo_20261108_104820.docx",
+        format="docx",
+        title="Resumo",
+        content="# Dívida Pública do Brasil: Análise Detalhada\n\nConteúdo.",
+    )
+
+    assert result.success is True
+    assert result.metadata["filename"] == "resumo_divida_publica_brasil.docx"
+    assert (tmp_path / result.metadata["filename"]).exists()
+
+
 def test_create_spreadsheet(tmp_path: Path) -> None:
     openpyxl = pytest.importorskip("openpyxl")
     result = CreateSpreadsheetTool([str(tmp_path)]).execute(
