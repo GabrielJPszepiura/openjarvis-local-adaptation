@@ -22,6 +22,8 @@ from openjarvis.agents.orchestrator import (
     _needs_evidence_research,
     _research_context_marker,
     _requested_list_count,
+    _requested_item_kind,
+    _presented_items,
     _source_ledger_marker,
     _web_grounded_input,
     _web_search_query,
@@ -228,6 +230,14 @@ class TestOrchestratorAgent:
         assert "não repita a apresentação completa" in instruction
         assert _choice_follow_up_instruction("Compare Japão e Croácia.") == ""
 
+    def test_option_record_prefers_numbered_items_over_category_headings(self):
+        answer = (
+            "### Opções econômicas\n"
+            "**1. México** texto.\n**2. Bolívia** texto.\n"
+            "### Opções culturais\n**3. Japão** texto."
+        )
+        assert _presented_items(answer) == ["México", "Bolívia", "Japão"]
+
     def test_choice_uses_the_matching_prior_research_not_the_latest_topic(self):
         travel_answer = (
             "1. **Japão**: cultura e transporte.\n"
@@ -311,6 +321,10 @@ class TestOrchestratorAgent:
         assert queries[0] == "os 5 melhores países para fazer intercâmbio."
         assert "O usuário pediu 5 itens" in grounded
         assert "uma única fonte traga a lista completa" in grounded
+
+    def test_generic_list_request_preserves_the_requested_item_kind(self):
+        assert _requested_item_kind("Quais são cinco notebooks recomendados?") == "notebooks"
+        assert _requested_item_kind("Liste 5 bancos atuais.") == "bancos"
 
     def test_explicit_word_request_creates_file_when_model_omits_tool(self, tmp_path):
         engine = _make_engine_no_tools("Resumo produzido a partir das planilhas.")
