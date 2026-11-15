@@ -1,9 +1,11 @@
 """Upload / Paste router for ingesting documents into the knowledge store."""
+# Modified by Gabriel_JP for the OpenJarvis local adaptation (2026-11-15).
 
 from __future__ import annotations
 
 import io
 import logging
+import math
 import uuid
 import zipfile
 from pathlib import PurePath
@@ -113,8 +115,126 @@ def _extract_text_from_docx(data: bytes) -> str:
     return "\n\n".join(paragraphs)
 
 
-def _extract_text_from_xlsx(data: bytes) -> str:
-    """Extract worksheet values from an XLSX file without executing formulas."""
+def _spreadsheet_cell_text(value: object) -> str:
+    """Return a compact, model-safe representation of an XLSX cell."""
+    if value is None:
+        return ""
+    if isinstance(value, float) and value.is_integer():
+        return str(int(value))
+    return str(value)
+
+
+def _normalized_header(value: object) -> str:
+    import unicodedata
+
+    text = unicodedata.normalize("NFKD", str(value or ""))
+    return "".join(char for char in text if not unicodedata.combining(char)).casefold()
+
+
+def _spreadsheet_number(value: object) -> float | None:
+    """Parse a stored numeric cell without evaluating formulas or formulas-as-text."""
+    if isinstance(value, bool) or value is None:
+        return None
+    if isinstance(value, (int, float)):
+        numeric = float(value)
+        return numeric if math.isfinite(numeric) else None
+    raw = str(value).strip()
+    if not raw or raw.startswith("="):
+        return None
+    negative = raw.startswith("(") and raw.endswith(")")
+    raw = raw.strip("()").replace("R$", "").replace("$", "").replace(" ", "")
+    if "." in raw and "," in raw:
+        raw = raw.replace(".", "").replace(",", ".")
+    elif "," in raw:
+        # A single comma followed by one or two digits is Brazilian decimal
+        # notation; repeated comma groups are English thousands separators.
+        raw = raw.replace(",", ".") if len(raw.rsplit(",", 1)[-1]) <= 2 else raw.replace(",", "")
+    try:
+        numeric = float(raw)
+    except ValueError:
+        return None
+    return -numeric if negative else numeric
+
+
+def _brl(value: float) -> str:
+    rendered = f"{value:,.2f}"
+    return "R$ " + rendered.replace(",", "X").replace(".", ",").replace("X", ".")
+
+
+def _verified_financial_summary(rows: list[list[object]], sheet_name: str) -> str:
+    """Calculate common financial-sheet metrics without trusting model arithmetic."""
+    for header_index, header_row in enumerate(rows[:15]):
+        headers = [_normalized_header(value) for value in header_row]
+        income = next(
+            (index for index, value in enumerate(headers) if any(token in value for token in ("receita", "faturamento", "revenue", "income"))),
+            None,
+        )
+        expense = next(
+            (index for index, value in enumerate(headers) if any(token in value for token in ("despesa", "custo", "gasto", "expense", "cost"))),
+            None,
+        )
+        period = next(
+            (index for index, value in enumerate(headers) if any(token in value for token in ("mes", "periodo", "month", "date"))),
+            None,
+        )
+        if income is None or expense is None:
+            continue
+
+        monthly: list[tuple[str, float, float, float]] = []
+        for row in rows[header_index + 1:]:
+            revenue = _spreadsheet_number(row[income]) if income < len(row) else None
+            costs = _spreadsheet_number(row[expense]) if expense < len(row) else None
+            if revenue is None or costs is None:
+                continue
+            label = _spreadsheet_cell_text(row[period]) if period is not None and period < len(row) else f"Linha {len(monthly) + 1}"
+            monthly.append((label or f"Linha {len(monthly) + 1}", revenue, costs, revenue - costs))
+        if not monthly:
+            continue
+
+        total_income = sum(item[1] for item in monthly)
+        total_expense = sum(item[2] for item in monthly)
+        net = total_income - total_expense
+        lines = [
+            f'<verified_spreadsheet_calculations sheet="{sheet_name}">',
+            "Valores calculados deterministamente pelo servidor; use-os como fonte numérica autoritativa.",
+            f"Total de receitas: {_brl(total_income)}",
+            f"Total de despesas: {_brl(total_expense)}",
+            f"Resultado líquido: {_brl(net)}",
+            f"Saldo acumulado final: {_brl(net)}",
+            "Resultados por período:",
+        ]
+        lines.extend(
+            f"- {label}: receitas {_brl(revenue)}; despesas {_brl(costs)}; resultado {_brl(result)}"
+            for label, revenue, costs, result in monthly
+        )
+        lines.append("</verified_spreadsheet_calculations>")
+        return "\n".join(lines)
+    return ""
+
+
+def _extract_text_from_xlsx_openpyxl(data: bytes) -> str:
+    """Extract named worksheets and deterministic financial facts from XLSX."""
+    from openpyxl import load_workbook
+
+    workbook = load_workbook(io.BytesIO(data), data_only=False, read_only=True)
+    sheets: list[str] = []
+    summaries: list[str] = []
+    for worksheet in workbook.worksheets:
+        rows = [list(row) for row in worksheet.iter_rows(values_only=True)]
+        rendered_rows = [
+            "\t".join(_spreadsheet_cell_text(value) for value in row).rstrip()
+            for row in rows
+        ]
+        visible_rows = [row for row in rendered_rows if row.strip()]
+        sheets.append(f"Planilha: {worksheet.title}\n" + "\n".join(visible_rows))
+        summary = _verified_financial_summary(rows, worksheet.title)
+        if summary:
+            summaries.append(summary)
+    return "\n\n".join([*sheets, *summaries])
+
+
+def _extract_text_from_xlsx_xml(data: bytes) -> str:
+    """Fallback XLSX reader for minimal workbook fixtures without openpyxl metadata."""
     namespace = "http://schemas.openxmlformats.org/spreadsheetml/2006/main"
     try:
         with zipfile.ZipFile(io.BytesIO(data)) as archive:
@@ -161,6 +281,20 @@ def _extract_text_from_xlsx(data: bytes) -> str:
     except (zipfile.BadZipFile, ElementTree.ParseError) as exc:
         raise HTTPException(status_code=400, detail="Invalid XLSX file") from exc
     return "\n\n".join(sheets)
+
+
+def _extract_text_from_xlsx(data: bytes) -> str:
+    """Extract worksheets without executing formulas, with verified financial metrics."""
+    try:
+        return _extract_text_from_xlsx_openpyxl(data)
+    except ImportError:
+        return _extract_text_from_xlsx_xml(data)
+    except Exception as exc:
+        # The XML fallback keeps small, standards-adjacent workbooks readable
+        # (and preserves compatibility with legacy uploads). Invalid archives
+        # still fail there with the existing 400 response.
+        logger.debug("openpyxl XLSX extraction failed; using XML fallback: %s", exc)
+        return _extract_text_from_xlsx_xml(data)
 
 
 def _extension(filename: str) -> str:

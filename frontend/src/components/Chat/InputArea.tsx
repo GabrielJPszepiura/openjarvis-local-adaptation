@@ -1,5 +1,7 @@
 import { useState, useRef, useCallback, useEffect } from 'react';
+// Modified by the OpenJarvis local adaptation (2026-11-13): optional cross-chat context.
 import { useTranslation } from 'react-i18next';
+import { AssistantPresence } from '../Assistant/AssistantPresence';
 import { FileText, FileUp, LoaderCircle, Paperclip, Search, Send, Square, X } from 'lucide-react';
 import { toast } from 'sonner';
 import { useAppStore, generateId } from '../../lib/store';
@@ -24,6 +26,82 @@ import type {
   TokenUsage,
   ToolCallInfo,
 } from '../../types';
+
+const CROSS_CHAT_CONTEXT_KEY = 'openjarvis-cross-chat-context';
+const MAX_CONNECTED_CHATS = 3;
+const MAX_CONNECTED_MESSAGES = 4;
+const MAX_CONNECTED_CHARS = 6000;
+
+const CROSS_CHAT_STOP_WORDS = new Set([
+  'agora', 'antes', 'com', 'como', 'dos', 'das', 'esse', 'esses', 'essa',
+  'essas', 'entre', 'para', 'qual', 'quais', 'sobre', 'uma', 'umas', 'uns',
+  'melhor', 'melhores', 'opcao', 'opcoes', 'opção', 'opções',
+]);
+
+function crossChatTerms(query: string): string[] {
+  return [...new Set(
+    query
+      .normalize('NFD')
+      .replace(/[\u0300-\u036f]/g, '')
+      .toLocaleLowerCase()
+      .match(/[a-z0-9]{4,}/g)
+      ?.filter((term) => !CROSS_CHAT_STOP_WORDS.has(term)) ?? [],
+  )];
+}
+
+function relevanceScore(content: string, terms: string[]): number {
+  const normalized = content
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLocaleLowerCase();
+  return terms.reduce((score, term) => score + (normalized.includes(term) ? 1 : 0), 0);
+}
+
+function connectedChatContext(activeConversationId: string | null, query: string): string {
+  try {
+    if (localStorage.getItem(CROSS_CHAT_CONTEXT_KEY) !== 'true') return '';
+    const raw = localStorage.getItem('openjarvis-conversations');
+    if (!raw) return '';
+    const parsed = JSON.parse(raw) as {
+      conversations?: Record<string, { id: string; title: string; updatedAt: number; messages?: ChatMessage[] }>;
+    };
+    const terms = crossChatTerms(query);
+    if (terms.length === 0) return '';
+    const excerpts = Object.values(parsed.conversations ?? {})
+      .filter((conversation) => conversation.id !== activeConversationId)
+      .map((conversation) => ({
+        conversation,
+        score: relevanceScore(
+          `${conversation.title}\n${(conversation.messages ?? []).map((message) => message.content).join('\n')}`,
+          terms,
+        ),
+      }))
+      .filter(({ score }) => score > 0)
+      .sort((a, b) => b.score - a.score || b.conversation.updatedAt - a.conversation.updatedAt)
+      .slice(0, MAX_CONNECTED_CHATS)
+      .map(({ conversation }) => {
+        const turns = (conversation.messages ?? [])
+          .map((message, index) => ({ message, index, score: relevanceScore(message.content, terms) }))
+          .filter(({ score }) => score > 0)
+          .sort((a, b) => b.score - a.score || b.index - a.index)
+          .slice(0, MAX_CONNECTED_MESSAGES)
+          .sort((a, b) => a.index - b.index)
+          .map(({ message }) => `${message.role}: ${message.content}`)
+          .join('\n');
+        return turns ? `Chat anterior — ${conversation.title}:\n${turns}` : '';
+      })
+      .filter(Boolean)
+      .join('\n\n');
+    if (!excerpts) return '';
+    return [
+      'O usuário ativou explicitamente o contexto entre chats.',
+      'Use os trechos abaixo apenas quando forem relevantes; não misture assuntos sem relação.',
+      excerpts.slice(0, MAX_CONNECTED_CHARS),
+    ].join('\n\n');
+  } catch {
+    return '';
+  }
+}
 
 // While Deep Research is toggled on, poll connected sources for sync
 // progress so we can surface "Searching over N items — sync in progress"
@@ -214,8 +292,10 @@ export function InputArea() {
     const responseLanguage = i18n.resolvedLanguage || i18n.language;
     const languageInstruction = responseLanguageInstruction(responseLanguage);
     const currentMessages = useAppStore.getState().messages;
+    const crossChatContext = connectedChatContext(convId, content);
     const apiMessages = [
       { role: 'system', content: languageInstruction },
+      ...(crossChatContext ? [{ role: 'system', content: crossChatContext }] : []),
       ...currentMessages.map((m, index) => ({
         role: m.role,
         content: index === currentMessages.length - 1 && m.role === 'user'
@@ -402,7 +482,14 @@ export function InputArea() {
         }
       } else {
       for await (const sseEvent of streamChat(
-        { model: selectedModel, messages: apiMessages, stream: true, temperature, max_tokens: maxTokens },
+        {
+          model: selectedModel,
+          messages: apiMessages,
+          stream: true,
+          conversation_id: convId,
+          temperature,
+          max_tokens: maxTokens,
+        },
         controller.signal,
       )) {
         const eventName = sseEvent.event;
@@ -732,7 +819,10 @@ export function InputArea() {
   };
 
   return (
-    <div className="px-4 pb-4 pt-2" style={{ maxWidth: 'var(--chat-max-width)', margin: '0 auto', width: '100%' }}>
+    <div
+      className="px-4 pb-4 pt-2"
+      style={{ maxWidth: 'calc(var(--chat-max-width) + 20rem)', margin: '0 auto', width: '100%' }}
+    >
       {isDraggingFiles && (
         <div
           className="pointer-events-none fixed inset-0 z-[100] flex items-center justify-center p-8"
@@ -812,14 +902,15 @@ export function InputArea() {
           ))}
         </div>
       )}
-      <div
-        className="flex items-center gap-2 rounded-2xl px-4 py-3 transition-shadow"
-        style={{
-          background: 'var(--color-input-bg)',
-          border: '1px solid var(--color-input-border)',
-          boxShadow: 'var(--shadow-sm)',
-        }}
-      >
+      <div className="flex items-center gap-3">
+        <div
+          className="flex min-w-0 flex-1 items-center gap-2 rounded-2xl px-4 py-3 transition-shadow"
+          style={{
+            background: 'var(--color-input-bg)',
+            border: '1px solid var(--color-input-border)',
+            boxShadow: 'var(--shadow-sm)',
+          }}
+        >
         <input
           ref={fileInputRef}
           type="file"
@@ -881,6 +972,8 @@ export function InputArea() {
             </button>
           </div>
         )}
+        </div>
+        <AssistantPresence />
       </div>
       <div className="flex items-center justify-center mt-2 text-[11px]" style={{ color: 'var(--color-text-tertiary)' }}>
         <span>

@@ -7,6 +7,8 @@ sessions.  The store is intentionally small and self-contained: it dedupes,
 caps the total number of facts, and is safe to call from multiple threads.
 """
 
+# Modified by the OpenJarvis local adaptation (2026-11-13): provenance-based fact deletion.
+
 from __future__ import annotations
 
 import errno
@@ -212,6 +214,11 @@ class FactStore(ABC):
     def count(self) -> int:
         """Return the number of stored facts."""
 
+    def delete_by_source(self, source: str) -> int:
+        """Delete facts with one provenance value when the backend supports it."""
+        del source
+        return 0
+
 
 @FactStoreRegistry.register("local")
 class LocalFactStore(FactStore):
@@ -380,6 +387,17 @@ class LocalFactStore(FactStore):
                 except OSError:
                     self._flush()
         return removed
+
+    def delete_by_source(self, source: str) -> int:
+        """Remove all locally persisted facts belonging to one conversation."""
+        with self._lock, _cross_process_lock(self._lock_path()):
+            self._sync_from_disk_locked()
+            original_count = len(self._facts)
+            self._facts = [fact for fact in self._facts if fact.source != source]
+            removed = original_count - len(self._facts)
+            if removed:
+                self._flush()
+            return removed
 
     def count(self) -> int:
         with self._lock:

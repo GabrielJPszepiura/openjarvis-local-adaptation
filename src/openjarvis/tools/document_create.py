@@ -1,4 +1,5 @@
 """Local document creation tools for DOCX, PDF, and XLSX files."""
+# Modified by Gabriel_JP for the OpenJarvis local adaptation (2026-11-15).
 
 from __future__ import annotations
 
@@ -124,6 +125,21 @@ def _content_blocks(content: str):
             yield "number", re.sub(r"^\d+[.)]\s+", "", line)
         else:
             yield "paragraph", line
+
+
+def _markdown_table_cells(line: str) -> list[str]:
+    """Split a simple Markdown-table row while preserving ordinary text."""
+    stripped = line.strip()
+    if stripped.startswith("|"):
+        stripped = stripped[1:]
+    if stripped.endswith("|"):
+        stripped = stripped[:-1]
+    return [cell.strip() for cell in stripped.split("|")]
+
+
+def _is_markdown_table_separator(line: str) -> bool:
+    cells = _markdown_table_cells(line)
+    return bool(cells) and all(re.fullmatch(r":?-{3,}:?", cell) for cell in cells)
 
 
 @ToolRegistry.register("create_document")
@@ -256,10 +272,11 @@ class CreateDocumentTool(_LocalOutputTool):
         from xml.sax.saxutils import escape
 
         from reportlab.lib.enums import TA_CENTER
+        from reportlab.lib import colors
         from reportlab.lib.pagesizes import A4
         from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
         from reportlab.lib.units import mm
-        from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer
+        from reportlab.platypus import HRFlowable, Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
 
         styles = getSampleStyleSheet()
         title_style = ParagraphStyle(
@@ -288,10 +305,78 @@ class CreateDocumentTool(_LocalOutputTool):
             "bullet": styles["BodyText"],
             "number": styles["BodyText"],
         }
+        body_style = ParagraphStyle(
+            "OpenJarvisBody",
+            parent=styles["BodyText"],
+            leading=15,
+            spaceAfter=0,
+        )
+
+        def inline_markup(text: str) -> str:
+            """Escape user content, then restore a small safe Markdown subset."""
+            escaped = escape(text)
+            escaped = re.sub(r"\*\*(.+?)\*\*", r"<b>\1</b>", escaped)
+            escaped = re.sub(r"`([^`]+)`", r"<font name=\"Courier\">\1</font>", escaped)
+            return escaped
+
+        lines = content.splitlines()
         number = 0
-        for kind, text in _content_blocks(content):
+        index = 0
+        while index < len(lines):
+            raw_line = lines[index]
+            text = raw_line.strip()
+            # Render a Markdown table as an actual PDF table. It must have a
+            # header followed by the familiar --- separator to avoid treating
+            # normal prose containing a pipe character as a table.
+            if (
+                "|" in text
+                and index + 1 < len(lines)
+                and _is_markdown_table_separator(lines[index + 1])
+            ):
+                header = _markdown_table_cells(text)
+                table_rows = [header]
+                cursor = index + 2
+                while cursor < len(lines) and "|" in lines[cursor]:
+                    row = _markdown_table_cells(lines[cursor])
+                    if len(row) != len(header):
+                        break
+                    table_rows.append(row)
+                    cursor += 1
+                if len(table_rows) > 1:
+                    available_width = A4[0] - 40 * mm
+                    column_width = available_width / len(header)
+                    pdf_rows = [
+                        [Paragraph(inline_markup(cell), body_style) for cell in row]
+                        for row in table_rows
+                    ]
+                    table = Table(pdf_rows, colWidths=[column_width] * len(header), repeatRows=1)
+                    table.setStyle(TableStyle([
+                        ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#0891B2")),
+                        ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+                        ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+                        ("VALIGN", (0, 0), (-1, -1), "TOP"),
+                        ("GRID", (0, 0), (-1, -1), 0.35, colors.HexColor("#CBD5E1")),
+                        ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, colors.HexColor("#F8FAFC")]),
+                        ("LEFTPADDING", (0, 0), (-1, -1), 6),
+                        ("RIGHTPADDING", (0, 0), (-1, -1), 6),
+                        ("TOPPADDING", (0, 0), (-1, -1), 5),
+                        ("BOTTOMPADDING", (0, 0), (-1, -1), 5),
+                    ]))
+                    story.extend([table, Spacer(1, 4 * mm)])
+                    index = cursor
+                    number = 0
+                    continue
+
+            if re.fullmatch(r"-{3,}", text):
+                story.extend([HRFlowable(width="100%", thickness=0.5, color=colors.HexColor("#CBD5E1")), Spacer(1, 4 * mm)])
+                index += 1
+                continue
+
+            blocks = list(_content_blocks(raw_line))
+            kind, text = blocks[0] if blocks else ("blank", "")
             if kind == "blank":
                 story.append(Spacer(1, 4 * mm))
+                index += 1
                 continue
             prefix = ""
             if kind == "bullet":
@@ -301,8 +386,10 @@ class CreateDocumentTool(_LocalOutputTool):
                 prefix = f"{number}. "
             else:
                 number = 0
-            story.append(Paragraph(escape(prefix + text), style_map[kind]))
+            style = body_style if kind in {"paragraph", "bullet", "number"} else style_map[kind]
+            story.append(Paragraph(inline_markup(prefix + text), style))
             story.append(Spacer(1, 2 * mm))
+            index += 1
         document.build(story)
 
 
@@ -332,6 +419,10 @@ class CreateSpreadsheetTool(_LocalOutputTool):
                         "type": "string",
                         "description": "Worksheet name. Default: Dados.",
                     },
+                    "title": {
+                        "type": "string",
+                        "description": "Optional worksheet title displayed above the table.",
+                    },
                     "columns": {
                         "type": "array",
                         "items": {"type": "string"},
@@ -347,6 +438,13 @@ class CreateSpreadsheetTool(_LocalOutputTool):
                         "description": (
                             "Replace an existing file. When false, a numbered copy "
                             "is created automatically. Default: false."
+                        ),
+                    },
+                    "include_summary": {
+                        "type": "boolean",
+                        "description": (
+                            "Create a calculated Resumo sheet when the columns "
+                            "describe financial receipts, expenses and balance."
                         ),
                     },
                 },
@@ -381,6 +479,8 @@ class CreateSpreadsheetTool(_LocalOutputTool):
                 str(params.get("sheet_name", "Dados")),
                 [str(column) for column in columns],
                 rows,
+                title=str(params.get("title", "")).strip(),
+                include_summary=bool(params.get("include_summary", False)),
             )
         except (ValueError, FileExistsError, OSError) as exc:
             return self._failure(str(exc))
@@ -408,39 +508,200 @@ class CreateSpreadsheetTool(_LocalOutputTool):
 
     @staticmethod
     def _create_xlsx(
-        path: Path, sheet_name: str, columns: List[str], rows: List[List[Any]]
+        path: Path,
+        sheet_name: str,
+        columns: List[str],
+        rows: List[List[Any]],
+        *,
+        title: str = "",
+        include_summary: bool = False,
     ) -> None:
         from openpyxl import Workbook
-        from openpyxl.styles import Alignment, Font, PatternFill
+        from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
+        from openpyxl.worksheet.table import Table, TableStyleInfo
         from openpyxl.utils import get_column_letter
 
         workbook = Workbook()
         sheet = workbook.active
         sheet.title = (sheet_name.strip() or "Dados")[:31]
-        sheet.append(columns)
-        for row in rows:
-            # Store formula-looking model/user text as literal text to prevent
-            # spreadsheet formula injection when the workbook is opened.
-            safe_row = [
-                "'" + value
-                if isinstance(value, str) and value.startswith(("=", "+", "-", "@"))
-                else value
-                for value in row
-            ]
-            sheet.append(safe_row)
+        header_row = 2 if title else 1
+        data_start_row = header_row + 1
+        if title:
+            sheet.merge_cells(
+                start_row=1, start_column=1, end_row=1, end_column=len(columns)
+            )
+            title_cell = sheet.cell(row=1, column=1, value=title)
+            title_cell.font = Font(color="FFFFFF", bold=True, size=14)
+            title_cell.alignment = Alignment(horizontal="left", vertical="center")
+            title_cell.fill = PatternFill("solid", fgColor="0F172A")
+            sheet.row_dimensions[1].height = 26
+
+        for index, column in enumerate(columns, start=1):
+            sheet.cell(row=header_row, column=index, value=column)
+
+        normalized_columns = [
+            unicodedata.normalize("NFKD", str(column)).encode("ascii", "ignore")
+            .decode("ascii")
+            .casefold()
+            for column in columns
+        ]
+        income_index = next(
+            (index + 1 for index, value in enumerate(normalized_columns) if "receita" in value),
+            None,
+        )
+        expense_index = next(
+            (index + 1 for index, value in enumerate(normalized_columns) if "despesa" in value),
+            None,
+        )
+        balance_index = next(
+            (index + 1 for index, value in enumerate(normalized_columns) if "saldo" in value),
+            None,
+        )
+        currency_indexes = {
+            index + 1
+            for index, value in enumerate(normalized_columns)
+            if any(token in value for token in ("receita", "despesa", "saldo", "valor", "total"))
+        }
+
+        for row_index, row in enumerate(rows, start=data_start_row):
+            for column_index, value in enumerate(row, start=1):
+                sheet.cell(
+                    row=row_index,
+                    column=column_index,
+                    value=CreateSpreadsheetTool._safe_cell_value(
+                        value, currency=column_index in currency_indexes
+                    ),
+                )
+
+        if income_index and expense_index and balance_index:
+            income_column = get_column_letter(income_index)
+            expense_column = get_column_letter(expense_index)
+            balance_column = get_column_letter(balance_index)
+            for row_index in range(data_start_row, data_start_row + len(rows)):
+                preceding = (
+                    f"{balance_column}{row_index - 1}+"
+                    if row_index > data_start_row
+                    else ""
+                )
+                sheet.cell(
+                    row=row_index,
+                    column=balance_index,
+                    value=(
+                        f"={preceding}{income_column}{row_index}-{expense_column}{row_index}"
+                    ),
+                )
 
         header_fill = PatternFill("solid", fgColor="0891B2")
-        for cell in sheet[1]:
+        for cell in sheet[header_row]:
             cell.font = Font(color="FFFFFF", bold=True)
             cell.fill = header_fill
-            cell.alignment = Alignment(horizontal="center")
-        sheet.freeze_panes = "A2"
-        sheet.auto_filter.ref = sheet.dimensions
+            cell.alignment = Alignment(horizontal="center", vertical="center")
+        thin_border = Border(bottom=Side(style="thin", color="CBD5E1"))
+        for row in sheet.iter_rows(min_row=data_start_row, max_row=sheet.max_row):
+            for cell in row:
+                cell.border = thin_border
+                cell.alignment = Alignment(vertical="center")
+                if cell.column in currency_indexes:
+                    cell.number_format = 'R$ #,##0.00'
+
+        sheet.freeze_panes = f"A{data_start_row}"
+        sheet.auto_filter.ref = (
+            f"A{header_row}:{get_column_letter(len(columns))}{sheet.max_row}"
+        )
+        sheet.sheet_view.showGridLines = False
         for index, column in enumerate(columns, start=1):
             values = [column, *(row[index - 1] for row in rows if len(row) >= index)]
-            width = min(max(len(str(value)) for value in values) + 2, 60)
-            sheet.column_dimensions[get_column_letter(index)].width = max(width, 10)
+            width = min(max(len(str(value)) for value in values) + 3, 32)
+            sheet.column_dimensions[get_column_letter(index)].width = max(width, 12)
+
+        if rows:
+            table = Table(
+                displayName="DadosTabela",
+                ref=f"A{header_row}:{get_column_letter(len(columns))}{sheet.max_row}",
+            )
+            table.tableStyleInfo = TableStyleInfo(
+                name="TableStyleMedium2",
+                showFirstColumn=False,
+                showLastColumn=False,
+                showRowStripes=True,
+                showColumnStripes=False,
+            )
+            sheet.add_table(table)
+
+        if income_index and expense_index and balance_index:
+            CreateSpreadsheetTool._add_financial_summary(
+                workbook,
+                data_sheet=sheet,
+                data_start_row=data_start_row,
+                data_end_row=sheet.max_row,
+                income_index=income_index,
+                expense_index=expense_index,
+                balance_index=balance_index,
+                title=title,
+            )
         workbook.save(path)
+
+    @staticmethod
+    def _safe_cell_value(value: Any, *, currency: bool) -> Any:
+        """Keep untrusted text literal while storing supplied monetary values as numbers."""
+        if currency and isinstance(value, str):
+            raw = value.strip().replace("R$", "").replace(" ", "")
+            if re.fullmatch(r"-?[\d.]+,[\d]{1,2}", raw):
+                return float(raw.replace(".", "").replace(",", "."))
+            if re.fullmatch(r"-?[\d,]+(?:\.\d{1,2})?", raw):
+                return float(raw.replace(",", ""))
+        if isinstance(value, str) and value.startswith(("=", "+", "-", "@")):
+            return "'" + value
+        return value
+
+    @staticmethod
+    def _add_financial_summary(
+        workbook: Any,
+        *,
+        data_sheet: Any,
+        data_start_row: int,
+        data_end_row: int,
+        income_index: int,
+        expense_index: int,
+        balance_index: int,
+        title: str,
+    ) -> None:
+        from openpyxl.styles import Alignment, Font, PatternFill
+        from openpyxl.utils import get_column_letter
+
+        summary = workbook.create_sheet("Resumo", 0)
+        summary.merge_cells("A1:B1")
+        summary["A1"] = title or "Resumo financeiro"
+        summary["A1"].font = Font(color="FFFFFF", bold=True, size=14)
+        summary["A1"].fill = PatternFill("solid", fgColor="0F172A")
+        summary["A1"].alignment = Alignment(horizontal="left", vertical="center")
+        summary.row_dimensions[1].height = 26
+        summary["A3"] = "Indicador"
+        summary["B3"] = "Valor"
+        for cell in summary[3]:
+            cell.font = Font(color="FFFFFF", bold=True)
+            cell.fill = PatternFill("solid", fgColor="0891B2")
+            cell.alignment = Alignment(horizontal="center")
+
+        sheet_name = data_sheet.title.replace("'", "''")
+        income_column = get_column_letter(income_index)
+        expense_column = get_column_letter(expense_index)
+        balance_column = get_column_letter(balance_index)
+        summary_rows = [
+            ("Total de receitas", f"=SUM('{sheet_name}'!{income_column}{data_start_row}:{income_column}{data_end_row})"),
+            ("Total de despesas", f"=SUM('{sheet_name}'!{expense_column}{data_start_row}:{expense_column}{data_end_row})"),
+            ("Resultado líquido", "=B4-B5"),
+            ("Saldo acumulado", f"='{sheet_name}'!{balance_column}{data_end_row}"),
+        ]
+        for row_index, (label, formula) in enumerate(summary_rows, start=4):
+            summary.cell(row=row_index, column=1, value=label)
+            value_cell = summary.cell(row=row_index, column=2, value=formula)
+            value_cell.number_format = 'R$ #,##0.00'
+            if row_index in {6, 7}:
+                value_cell.font = Font(bold=True)
+        summary.column_dimensions["A"].width = 24
+        summary.column_dimensions["B"].width = 18
+        summary.sheet_view.showGridLines = False
 
 
 __all__ = ["CreateDocumentTool", "CreateSpreadsheetTool"]

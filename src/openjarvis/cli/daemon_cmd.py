@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+# Modified by the OpenJarvis local adaptation (2026-11-14): 30-day server log retention.
+
 import json
 import os
 import re
@@ -22,11 +24,46 @@ from openjarvis.security.file_utils import secure_write_json, secure_write_text
 
 _PID_FILE = DEFAULT_CONFIG_DIR / "server.pid"
 _LOG_FILE = DEFAULT_CONFIG_DIR / "server.log"
+_LOG_RETENTION_DAYS = 30
 # Records the address the daemon was actually started on. Without it `status`
 # and `restart` fall back to the config defaults and misreport (or silently
 # move) the port whenever `start` was given an explicit --host/--port.
 _STATE_FILE = DEFAULT_CONFIG_DIR / "server.json"
 _LAUNCH_TOKEN_ENV = "OPENJARVIS_DAEMON_LAUNCH_TOKEN"
+
+
+def _rotate_and_prune_server_log(now: float | None = None) -> None:
+    """Archive the prior server session and retain archives for 30 days.
+
+    ``server.log`` is the active process' stdout/stderr target, so it cannot
+    be safely renamed while the server is running on Windows. Rotation happens
+    immediately before the next daemon launch; old session archives are then
+    removed by modification time.
+    """
+    from datetime import datetime
+
+    timestamp = time.time() if now is None else now
+    _LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
+    if _LOG_FILE.exists() and _LOG_FILE.stat().st_size > 0:
+        stamp = datetime.fromtimestamp(timestamp).strftime("%Y%m%d-%H%M%S")
+        archive = _LOG_FILE.with_name(f"server-{stamp}.log")
+        counter = 1
+        while archive.exists():
+            archive = _LOG_FILE.with_name(f"server-{stamp}-{counter}.log")
+            counter += 1
+        try:
+            _LOG_FILE.replace(archive)
+        except OSError:
+            # Retention must never prevent the local assistant from starting.
+            return
+
+    cutoff = timestamp - (_LOG_RETENTION_DAYS * 24 * 60 * 60)
+    for archive in _LOG_FILE.parent.glob("server-*.log"):
+        try:
+            if archive.stat().st_mtime < cutoff:
+                archive.unlink()
+        except OSError:
+            pass
 
 
 def _pid_alive(pid: int) -> bool:
@@ -438,6 +475,7 @@ def start(
     with _state_lock():
         existing = _read_pid_unlocked()
         if existing is None:
+            _rotate_and_prune_server_log()
             with open(_LOG_FILE, "a") as log_fh:
                 proc = subprocess.Popen(
                     cmd,

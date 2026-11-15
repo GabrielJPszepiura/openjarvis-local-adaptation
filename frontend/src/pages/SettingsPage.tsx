@@ -1,5 +1,7 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
+// Modified by the OpenJarvis local adaptation (2026-11-13): opt-in cross-chat context.
 import { useTranslation } from 'react-i18next';
+import { toast } from 'sonner';
 import '../lib/i18n';
 import {
   Palette,
@@ -19,6 +21,7 @@ import {
   Search,
   Brain,
   RefreshCw,
+  AlertTriangle,
 } from 'lucide-react';
 import { useAppStore, type AppLanguage, type ThemeMode } from '../lib/store';
 import {
@@ -29,6 +32,8 @@ import {
   getInferenceSource,
   setInferenceSource,
   getCloudKeyStatus,
+  deleteConversationData,
+  deleteAllConversationData,
   saveCloudKey,
   fetchToolCredentialStatus,
   saveToolCredentials,
@@ -38,6 +43,15 @@ import {
   type MemoryStats,
 } from '../lib/api';
 import { isAutoUpdateDisabled, setAutoUpdateDisabled } from '../components/Desktop/UpdateChecker';
+import { Button } from '../components/ui/button';
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from '../components/ui/dialog';
 
 const CLOUD_KEY_STATUS_CHANGED = 'openjarvis-cloud-key-status-changed';
 
@@ -327,6 +341,9 @@ export function SettingsPage() {
   const [memoryEnabled, setMemoryEnabled] = useState(() => {
     try { return localStorage.getItem('openjarvis-memory-enabled') !== 'false'; } catch { return true; }
   });
+  const [crossChatContextEnabled, setCrossChatContextEnabled] = useState(() => {
+    try { return localStorage.getItem('openjarvis-cross-chat-context') === 'true'; } catch { return false; }
+  });
   const [memoryBackend, setMemoryBackend] = useState(() => {
     try { return localStorage.getItem('openjarvis-memory-backend') || 'sqlite'; } catch { return 'sqlite'; }
   });
@@ -446,20 +463,22 @@ export function SettingsPage() {
     input.click();
   };
 
-  const [confirmClear, setConfirmClear] = useState(false);
-  const handleClear = () => {
-    if (!confirmClear) {
-      setConfirmClear(true);
-      setTimeout(() => setConfirmClear(false), 3000);
+  const [clearDialogOpen, setClearDialogOpen] = useState(false);
+  const handleClear = async () => {
+    try {
+      await deleteAllConversationData();
+    } catch {
+      // Keep local history when the backend cleanup did not complete.
       return;
     }
     localStorage.removeItem('openjarvis-conversations');
     useAppStore.getState().loadConversations();
-    setConfirmClear(false);
+    setClearDialogOpen(false);
     showSaved();
   };
 
   return (
+    <>
     <div className="flex-1 overflow-y-auto px-6 py-10">
       <div className="max-w-2xl mx-auto">
         <header className="mb-6">
@@ -704,6 +723,23 @@ export function SettingsPage() {
                 />
               </button>
             </SettingRow>
+            <SettingRow label={t('settings.connectChatHistory')} description={t('settings.connectChatHistoryDescription')}>
+              <button
+                onClick={() => {
+                  const next = !crossChatContextEnabled;
+                  setCrossChatContextEnabled(next);
+                  try { localStorage.setItem('openjarvis-cross-chat-context', String(next)); } catch {}
+                  showSaved();
+                }}
+                className="relative w-11 h-6 rounded-full transition-colors cursor-pointer"
+                style={{ background: crossChatContextEnabled ? 'var(--color-accent)' : 'var(--color-bg-tertiary)' }}
+              >
+                <span
+                  className="absolute top-0.5 left-0.5 w-5 h-5 rounded-full transition-transform bg-white"
+                  style={{ transform: crossChatContextEnabled ? 'translateX(20px)' : 'translateX(0)', boxShadow: '0 1px 3px rgba(0,0,0,0.2)' }}
+                />
+              </button>
+            </SettingRow>
             <SettingRow label={t('settings.memoryBackend')} description={t('settings.memoryBackendDescription')}>
               <select
                 value={memoryBackend}
@@ -924,17 +960,23 @@ export function SettingsPage() {
             </SettingRow>
             <SettingRow label={t('settings.clearAllData')} description={t('settings.clearAllDataDescription')}>
               <button
-                onClick={handleClear}
+                onClick={() => {
+                  if (conversations.length === 0) {
+                    toast.info(t('settings.noConversationData'));
+                    return;
+                  }
+                  setClearDialogOpen(true);
+                }}
                 className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium transition-colors cursor-pointer"
                 style={{
-                  color: confirmClear ? 'white' : 'var(--color-error)',
-                  background: confirmClear ? 'var(--color-error)' : 'transparent',
+                  color: 'var(--color-error)',
+                  background: 'transparent',
                   border: '1px solid var(--color-error)',
                 }}
-                onMouseEnter={(e) => { if (!confirmClear) e.currentTarget.style.background = 'rgba(220,38,38,0.1)'; }}
-                onMouseLeave={(e) => { if (!confirmClear) e.currentTarget.style.background = 'transparent'; }}
+                onMouseEnter={(e) => { e.currentTarget.style.background = 'rgba(220,38,38,0.1)'; }}
+                onMouseLeave={(e) => { e.currentTarget.style.background = 'transparent'; }}
               >
-                <Trash2 size={12} /> {confirmClear ? 'Click again to confirm' : 'Clear'}
+                <Trash2 size={12} /> Clear
               </button>
             </SettingRow>
           </Section>
@@ -1004,5 +1046,78 @@ export function SettingsPage() {
         </div>
       </div>
     </div>
+      <Dialog open={clearDialogOpen} onOpenChange={setClearDialogOpen}>
+        <DialogContent
+          className="max-w-md overflow-hidden p-0"
+          style={{
+            background: 'var(--color-bg-secondary)',
+            border: '1px solid var(--color-border)',
+            color: 'var(--color-text)',
+            boxShadow: '0 24px 80px rgba(0, 0, 0, 0.45)',
+          }}
+        >
+          <div className="p-5">
+            <DialogHeader className="gap-0">
+              <div className="flex items-start gap-3">
+                <div
+                  className="flex size-10 shrink-0 items-center justify-center rounded-xl"
+                  style={{
+                    background: 'color-mix(in srgb, var(--color-error) 14%, transparent)',
+                    color: 'var(--color-error)',
+                  }}
+                >
+                  <AlertTriangle size={20} />
+                </div>
+                <div className="min-w-0 pt-0.5">
+                  <DialogTitle style={{ color: 'var(--color-text)' }}>
+                    {t('settings.clearAllDataTitle')}
+                  </DialogTitle>
+                  <DialogDescription
+                    className="mt-2 leading-relaxed"
+                    style={{ color: 'var(--color-text-secondary)' }}
+                  >
+                    {t('settings.clearAllDataConfirmation')}
+                  </DialogDescription>
+                </div>
+              </div>
+            </DialogHeader>
+          </div>
+          <DialogFooter
+            className="m-0 rounded-none border-t px-5 py-4"
+            style={{
+              background: 'var(--color-bg-tertiary)',
+              borderColor: 'var(--color-border)',
+            }}
+          >
+            <Button
+              variant="outline"
+              className="min-w-24"
+              style={{
+                background: 'var(--color-bg-secondary)',
+                borderColor: 'var(--color-border)',
+                color: 'var(--color-text)',
+              }}
+              onClick={() => setClearDialogOpen(false)}
+              autoFocus
+            >
+              {t('common.cancel')}
+            </Button>
+            <Button
+              variant="destructive"
+              className="min-w-36"
+              style={{
+                background: 'color-mix(in srgb, var(--color-error) 14%, transparent)',
+                borderColor: 'color-mix(in srgb, var(--color-error) 28%, transparent)',
+                color: 'var(--color-error)',
+              }}
+              onClick={handleClear}
+            >
+              <Trash2 size={14} />
+              {t('settings.confirmClearAllData')}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+    </>
   );
 }

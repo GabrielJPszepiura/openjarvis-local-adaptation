@@ -13,6 +13,8 @@ The service is started and stopped as part of the OpenJarvis lifecycle (see
 ``[memory]`` section of ``config.toml``.
 """
 
+# Modified by the OpenJarvis local adaptation (2026-11-13): per-conversation memory deletion.
+
 from __future__ import annotations
 
 import logging
@@ -57,6 +59,7 @@ class MemoryService:
         self._scanner = scanner
         self._subscribed = False
         self._queue: "queue.Queue[Any]" = queue.Queue(maxsize=max(1, max_queue))
+        self._deleted_sources: set[str] = set()
         self._thread: Optional[threading.Thread] = None
         self._running = threading.Event()
 
@@ -98,7 +101,9 @@ class MemoryService:
 
     # -- submission ---------------------------------------------------------
 
-    def submit(self, user_text: str, assistant_text: str = "") -> bool:
+    def submit(
+        self, user_text: str, assistant_text: str = "", *, source: str = "auto"
+    ) -> bool:
         """Queue an exchange for extraction. Non-blocking; never raises.
 
         Returns True if the job was enqueued, False if the service is not
@@ -109,8 +114,10 @@ class MemoryService:
             return False
         if not user_text or not user_text.strip():
             return False
+        if source in self._deleted_sources:
+            return False
         try:
-            self._queue.put_nowait((user_text, assistant_text))
+            self._queue.put_nowait((user_text, assistant_text, source))
             return True
         except queue.Full:
             logger.debug("Memory service queue full; dropping exchange")
@@ -142,6 +149,7 @@ class MemoryService:
         self.submit(
             str(data.get("user_text", "") or ""),
             str(data.get("assistant_text", "") or ""),
+            source=str(data.get("source", "auto") or "auto"),
         )
 
     # -- worker -------------------------------------------------------------
@@ -210,7 +218,13 @@ class MemoryService:
         return name in _BLOCKING_THREAT_LEVELS
 
     def _process(self, job: Any) -> None:
-        user_text, assistant_text = job
+        if len(job) == 2:  # Compatibility with queued jobs from older versions.
+            user_text, assistant_text = job
+            source = "auto"
+        else:
+            user_text, assistant_text, source = job
+        if source in self._deleted_sources:
+            return
         # Scan BEFORE extraction so an overt injection attempt never reaches the
         # extraction model or the store at all.
         if self._blocks_exchange(self._scan(f"{user_text}\n{assistant_text}")):
@@ -230,10 +244,10 @@ class MemoryService:
         for fact in facts:
             target = quarantined if self._flagged(self._scan(fact)) else clean
             target.append(fact)
-        stored = self._store.add_many_with_trust(clean, source="auto", trust=TRUST_AUTO)
+        stored = self._store.add_many_with_trust(clean, source=source, trust=TRUST_AUTO)
         if quarantined:
             stored += self._store.add_many_with_trust(
-                quarantined, source="auto", trust=TRUST_UNTRUSTED
+                quarantined, source=source, trust=TRUST_UNTRUSTED
             )
             logger.info(
                 "Memory: quarantined %d extracted fact(s) as untrusted",
@@ -249,6 +263,12 @@ class MemoryService:
 
     def clear_facts(self) -> int:
         return self._store.clear()
+
+    def delete_conversation(self, conversation_id: str) -> int:
+        """Forget automatic facts linked to a deleted browser conversation."""
+        source = f"conversation:{conversation_id}"
+        self._deleted_sources.add(source)
+        return self._store.delete_by_source(source)
 
     def fact_count(self) -> int:
         return self._store.count()

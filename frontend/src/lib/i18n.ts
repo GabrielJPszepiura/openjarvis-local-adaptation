@@ -1,4 +1,5 @@
 import i18n from 'i18next';
+// Modified by the OpenJarvis local adaptation (2026-11-13): cross-chat context settings.
 import LanguageDetector from 'i18next-browser-languagedetector';
 import { initReactI18next } from 'react-i18next';
 
@@ -41,6 +42,8 @@ const enUS = {
       memoryStatus: 'Memory status', checking: 'Checking...', checkingMemory: 'Checking memory backend...',
       memoryNotConfigured: 'Memory is not configured', useMemory: 'Use memory context',
       useMemoryDescription: 'Automatically inject relevant memories into conversations',
+      connectChatHistory: 'Connect chat history',
+      connectChatHistoryDescription: 'Allow relevant excerpts from recent chats to be used in new answers',
       memoryBackend: 'Memory backend', memoryBackendDescription: 'Which retrieval engine to use',
       resultsToInject: 'Results to inject', minRelevance: 'Min relevance score',
       maxContextTokens: 'Max context tokens', modelDefaults: 'Model Defaults', temperature: 'Temperature',
@@ -51,6 +54,10 @@ const enUS = {
       backendStatus: 'Backend status', data: 'Data', conversations: 'Conversations',
       storedLocally: '{{count}} stored locally', clearAllData: 'Clear all data',
       clearAllDataDescription: 'Permanently delete all conversations', updates: 'Updates',
+      clearAllDataTitle: 'Clear all data?',
+      clearAllDataConfirmation: 'All conversations and data associated with them will be permanently deleted. This action cannot be undone.',
+      confirmClearAllData: 'Clear all data',
+      noConversationData: 'There are no conversations to clear.',
       autoUpdate: 'Auto-update', autoUpdateDescription: 'Check for new desktop builds automatically every 30 minutes',
       checkUpdates: 'Check for updates', checkUpdatesDescription: 'Manually check for a new version right now',
       about: 'About', secureStorage: 'Saved in secure storage', localServerStorage: 'Saved by local server',
@@ -133,6 +140,8 @@ const ptBR = {
       memoryStatus: 'Status da memória', checking: 'Verificando...', checkingMemory: 'Verificando o backend de memória...',
       memoryNotConfigured: 'A memória não está configurada', useMemory: 'Usar contexto da memória',
       useMemoryDescription: 'Inclua automaticamente memórias relevantes nas conversas',
+      connectChatHistory: 'Conectar histórico entre chats',
+      connectChatHistoryDescription: 'Permite usar trechos relevantes de chats recentes em novas respostas',
       memoryBackend: 'Backend da memória', memoryBackendDescription: 'Mecanismo de recuperação utilizado',
       resultsToInject: 'Resultados a incluir', minRelevance: 'Relevância mínima',
       maxContextTokens: 'Máximo de tokens de contexto', modelDefaults: 'Padrões do modelo', temperature: 'Temperatura',
@@ -144,6 +153,10 @@ const ptBR = {
       backendStatus: 'Status do backend', data: 'Dados', conversations: 'Conversas',
       storedLocally: '{{count}} armazenadas localmente', clearAllData: 'Limpar todos os dados',
       clearAllDataDescription: 'Exclua permanentemente todas as conversas', updates: 'Atualizações',
+      clearAllDataTitle: 'Limpar todos os dados?',
+      clearAllDataConfirmation: 'Todas as conversas e os dados vinculados a elas serão excluídos permanentemente. Esta ação não pode ser desfeita.',
+      confirmClearAllData: 'Limpar todos os dados',
+      noConversationData: 'Não há conversas para limpar.',
       autoUpdate: 'Atualização automática', autoUpdateDescription: 'Verifique novas versões do aplicativo a cada 30 minutos',
       checkUpdates: 'Procurar atualizações', checkUpdatesDescription: 'Procure manualmente uma nova versão agora',
       about: 'Sobre', secureStorage: 'Salva no armazenamento seguro', localServerStorage: 'Salva pelo servidor local',

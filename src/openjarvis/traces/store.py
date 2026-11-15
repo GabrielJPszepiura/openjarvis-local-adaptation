@@ -1,5 +1,7 @@
 """SQLite-backed trace storage."""
 
+# Modified by the OpenJarvis local adaptation (2026-11-13): conversation purge support.
+
 from __future__ import annotations
 
 import json
@@ -30,6 +32,7 @@ CREATE TABLE IF NOT EXISTS traces (
     total_latency_seconds REAL   NOT NULL DEFAULT 0.0,
     metadata             TEXT    NOT NULL DEFAULT '{}',
     messages             TEXT    NOT NULL DEFAULT '[]'
+    , conversation_id     TEXT    NOT NULL DEFAULT ''
 );
 """
 
@@ -45,6 +48,17 @@ CREATE TABLE IF NOT EXISTS trace_steps (
     output           TEXT    NOT NULL DEFAULT '{}',
     metadata         TEXT    NOT NULL DEFAULT '{}',
     FOREIGN KEY (trace_id) REFERENCES traces(trace_id)
+);
+"""
+
+_CREATE_ARTIFACTS = """\
+CREATE TABLE IF NOT EXISTS generated_artifacts (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    conversation_id TEXT    NOT NULL,
+    trace_id        TEXT    NOT NULL DEFAULT '',
+    filename        TEXT    NOT NULL,
+    created_at      REAL    NOT NULL DEFAULT 0.0,
+    UNIQUE(conversation_id, filename)
 );
 """
 
@@ -68,8 +82,8 @@ _INSERT_TRACE = """\
 INSERT INTO traces (
     trace_id, query, agent, model, engine, result,
     outcome, feedback, started_at, ended_at,
-    total_tokens, total_latency_seconds, metadata, messages
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    total_tokens, total_latency_seconds, metadata, messages, conversation_id
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 """
 
 _INSERT_STEP = """\
@@ -114,6 +128,7 @@ class TraceStore:
         self._conn.execute("PRAGMA journal_mode=WAL")
         self._conn.execute(_CREATE_TRACES)
         self._conn.execute(_CREATE_STEPS)
+        self._conn.execute(_CREATE_ARTIFACTS)
         self._conn.execute(_CREATE_FTS)
         self._conn.execute(_FTS_SYNC_INSERT)
         # Migrate: add messages column if missing (pre-existing databases)
@@ -123,6 +138,20 @@ class TraceStore:
             )
         except sqlite3.OperationalError:
             pass  # Column already exists
+        try:
+            self._conn.execute(
+                "ALTER TABLE traces ADD COLUMN conversation_id TEXT NOT NULL DEFAULT ''"
+            )
+        except sqlite3.OperationalError:
+            pass  # Column already exists
+        self._conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_traces_conversation_id "
+            "ON traces(conversation_id)"
+        )
+        self._conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_generated_artifacts_conversation_id "
+            "ON generated_artifacts(conversation_id)"
+        )
         self._conn.commit()
 
     @_db_locked
@@ -153,6 +182,7 @@ class TraceStore:
                 trace.total_latency_seconds,
                 json.dumps(trace.metadata),
                 json.dumps(trace.messages),
+                str(trace.metadata.get("conversation_id", "")),
             ),
         )
         for idx, step in enumerate(trace.steps):
@@ -172,6 +202,102 @@ class TraceStore:
                 ),
             )
         self._conn.commit()
+
+    @_db_locked
+    def register_generated_artifacts(
+        self,
+        conversation_id: str,
+        filenames: list[str],
+        *,
+        trace_id: str = "",
+    ) -> None:
+        """Associate safely served generated files with one conversation."""
+        if not conversation_id:
+            return
+        import time
+
+        for filename in filenames:
+            safe_name = Path(str(filename)).name
+            if not safe_name or safe_name != filename:
+                continue
+            self._conn.execute(
+                "INSERT OR IGNORE INTO generated_artifacts "
+                "(conversation_id, trace_id, filename, created_at) VALUES (?, ?, ?, ?)",
+                (conversation_id, trace_id, safe_name, time.time()),
+            )
+        self._conn.commit()
+
+    @_db_locked
+    def delete_conversation(self, conversation_id: str) -> list[str]:
+        """Delete all stored traces and return files registered to the chat.
+
+        File deletion is deliberately performed by the server route after this
+        transaction, where generated-file roots are available for validation.
+        """
+        if not conversation_id:
+            return []
+        filenames = [
+            row[0]
+            for row in self._conn.execute(
+                "SELECT filename FROM generated_artifacts WHERE conversation_id = ?",
+                (conversation_id,),
+            ).fetchall()
+        ]
+        trace_ids = [
+            row[0]
+            for row in self._conn.execute(
+                "SELECT trace_id FROM traces WHERE conversation_id = ?",
+                (conversation_id,),
+            ).fetchall()
+        ]
+        if trace_ids:
+            placeholders = ",".join("?" for _ in trace_ids)
+            self._conn.execute(
+                f"DELETE FROM trace_steps WHERE trace_id IN ({placeholders})", trace_ids
+            )
+            self._conn.execute(
+                f"DELETE FROM traces_fts WHERE trace_id IN ({placeholders})", trace_ids
+            )
+        self._conn.execute(
+            "DELETE FROM traces WHERE conversation_id = ?", (conversation_id,)
+        )
+        self._conn.execute(
+            "DELETE FROM generated_artifacts WHERE conversation_id = ?",
+            (conversation_id,),
+        )
+        self._conn.commit()
+        return filenames
+
+    @_db_locked
+    def delete_all_conversations(self) -> tuple[int, list[str]]:
+        """Delete every trace and registered artifact from local chat history.
+
+        This is deliberately broader than :meth:`delete_conversation`: it also
+        removes legacy traces written before browser conversations had stable
+        IDs, so the user's explicit "clear all data" action is complete.
+        """
+        filenames = [
+            row[0]
+            for row in self._conn.execute(
+                "SELECT filename FROM generated_artifacts"
+            ).fetchall()
+        ]
+        trace_ids = [
+            row[0]
+            for row in self._conn.execute("SELECT trace_id FROM traces").fetchall()
+        ]
+        if trace_ids:
+            placeholders = ",".join("?" for _ in trace_ids)
+            self._conn.execute(
+                f"DELETE FROM trace_steps WHERE trace_id IN ({placeholders})", trace_ids
+            )
+            self._conn.execute(
+                f"DELETE FROM traces_fts WHERE trace_id IN ({placeholders})", trace_ids
+            )
+        self._conn.execute("DELETE FROM traces")
+        self._conn.execute("DELETE FROM generated_artifacts")
+        self._conn.commit()
+        return len(trace_ids), filenames
 
     @_db_locked
     def get(self, trace_id: str) -> Optional[Trace]:
@@ -223,6 +349,15 @@ class TraceStore:
         """Return the total number of stored traces."""
         row = self._conn.execute("SELECT COUNT(*) FROM traces").fetchone()
         return row[0] if row else 0
+
+    @_db_locked
+    def count_for_conversation(self, conversation_id: str) -> int:
+        """Return the number of traces linked to one browser conversation."""
+        row = self._conn.execute(
+            "SELECT COUNT(*) FROM traces WHERE conversation_id = ?",
+            (conversation_id,),
+        ).fetchone()
+        return int(row[0]) if row else 0
 
     @_db_locked
     def search(

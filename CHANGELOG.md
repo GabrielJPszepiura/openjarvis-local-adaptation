@@ -1,3 +1,5 @@
+<!-- Modified by Gabriel_JP for the OpenJarvis local adaptation (2026-11-15). -->
+
 # Changelog
 
 All notable changes to OpenJarvis are documented in this file.
@@ -9,6 +11,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Added
+
+**Privacidade por conversa na interface local.** Cada chat novo recebe um
+identificador estável que acompanha as requisições ao backend. Rastros,
+memória automática e arquivos gerados passam a ser vinculados a esse ID; ao
+excluir o chat, a interface solicita a remoção dos dados vinculados. A opção
+"Conectar histórico entre chats" é desativada por padrão e, quando ativada
+explicitamente, fornece apenas trechos recentes de outros chats como contexto.
+
+**Retenção de logs técnicos.** A cada inicialização do servidor, o log da
+sessão anterior é arquivado e arquivos de log com mais de 30 dias são removidos.
 
 **Apple Foundation Models (AFM 3)** — a new in-process `afm` engine drives
 Apple's `apple-fm-sdk` directly, with no HTTP hop and no second process whose

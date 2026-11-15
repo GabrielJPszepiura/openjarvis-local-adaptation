@@ -1,0 +1,13 @@
+OpenJarvis Local Adaptation
+Copyright 2026 Gabriel_JP
+
+This repository contains a local adaptation of OpenJarvis.
+Original project: https://github.com/open-jarvis/OpenJarvis
+Original copyright: Copyright 2025 The OpenJarvis Authors
+
+Local adaptations include improvements to conversation-scoped privacy,
+cross-chat context controls, web-research continuity, file creation and
+analysis, interface behavior, and automated tests.
+
+The original OpenJarvis source code and this distribution are provided under
+the Apache License, Version 2.0. See LICENSE for the full terms.
