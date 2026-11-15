@@ -1471,7 +1471,9 @@ def _web_grounded_input(
         + "cobertura faltou. Para assuntos não sensíveis, não recuse uma lista só "
         + "porque nenhuma fonte traz todos os itens ou todos os preços exatos: use "
         + "os candidatos concretos encontrados nas fontes e explique brevemente a "
-        + "variação de preço ou disponibilidade, se relevante.\n</requested_list_coverage>"
+        + "variação de preço ou disponibilidade, se relevante. Para cada item, dê "
+        + "um motivo curto e concreto da recomendação; não entregue apenas nomes ou "
+        + "um ranking seco.\n</requested_list_coverage>"
         if requested_count
         else ""
     )
@@ -2065,40 +2067,23 @@ class OrchestratorAgent(ToolUsingAgent):
             else:
                 approved_calls.append((query, tool_call))
 
-        if approved_calls:
-            # Source classification uses a locked cache; independent provider
-            # searches can therefore run concurrently without adding a linear
-            # wait for every referenced item.
-            with concurrent.futures.ThreadPoolExecutor(
-                max_workers=min(3, len(approved_calls))
-            ) as pool:
-                futures = {
-                    pool.submit(self._executor.execute, tool_call): query
-                    for query, tool_call in approved_calls
-                }
-                for future in concurrent.futures.as_completed(futures):
-                    query = futures[future]
-                    results_by_query[query] = future.result()
+        # ToolExecutor carries security and trace state. Run these bounded
+        # requests serially so one query cannot overwrite another's arguments
+        # or provenance in a shared executor.
+        for query, tool_call in approved_calls:
+            results_by_query[query] = self._executor.execute(tool_call)
 
         # Each contextual item gets one bounded evidence package.  Preparing
         # those packages concurrently avoids multiplying waiting time by the
         # number of referenced items, while the per-package fetch limit still
         # prevents a broad fan-out of page loads.
         prepared_by_query: dict[str, ToolResult] = {}
-        with concurrent.futures.ThreadPoolExecutor(
-            max_workers=min(3, len(queries))
-        ) as pool:
-            futures = {
-                pool.submit(
-                    self._prepare_search_evidence,
-                    _filter_research_evidence(results_by_query[query], query),
-                    query,
-                    max_sources=1,
-                ): query
-                for query in queries
-            }
-            for future in concurrent.futures.as_completed(futures):
-                prepared_by_query[futures[future]] = future.result()
+        for query in queries:
+            prepared_by_query[query] = self._prepare_search_evidence(
+                _filter_research_evidence(results_by_query[query], query),
+                query,
+                max_sources=1,
+            )
         results = [(query, prepared_by_query[query]) for query in queries]
 
         successful = [(query, item) for query, item in results if item.success]
@@ -2275,17 +2260,8 @@ class OrchestratorAgent(ToolUsingAgent):
             else:
                 approved_calls.append((candidate, tool_call))
 
-        if approved_calls:
-            with concurrent.futures.ThreadPoolExecutor(
-                max_workers=min(3, len(approved_calls))
-            ) as pool:
-                futures = {
-                    pool.submit(self._executor.execute, tool_call): candidate
-                    for candidate, tool_call in approved_calls
-                }
-                for future in concurrent.futures.as_completed(futures):
-                    candidate = futures[future]
-                    fetched[str(candidate["url"])] = future.result()
+        for candidate, tool_call in approved_calls:
+            fetched[str(candidate["url"])] = self._executor.execute(tool_call)
 
         evidence_blocks: list[str] = []
         approved_sources: list[dict[str, object]] = []
