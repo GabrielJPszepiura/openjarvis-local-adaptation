@@ -923,7 +923,10 @@ def _web_search_queries(
     # presented option under the user's criterion, so a generic result about
     # a fourth country/product cannot become the answer by accident.
     choice_options = _choice_options(input_text, context_messages or [])
-    if _choice_follow_up_instruction(input_text) and choice_options:
+    if (
+        (_choice_follow_up_instruction(input_text) or _comparison_follow_up_instruction(input_text))
+        and choice_options
+    ):
         criterion = _choice_research_criteria(input_text)
         return [f"{option} {criterion}".strip() for option in choice_options]
 
@@ -1397,6 +1400,22 @@ def _choice_follow_up_instruction(input_text: str) -> str:
     )
 
 
+def _comparison_follow_up_instruction(input_text: str) -> str:
+    """Keep a contextual comparison bound to already presented options."""
+    text = _plain_text(input_text)
+    if not (
+        _CONTEXTUAL_WEB_REFERENCE_RE.search(text)
+        and re.search(r"\b(?:compare|comparacao|vantagens?|desvantagens?|cuidados|pontos)\b", text)
+    ):
+        return ""
+    return (
+        "\n<contextual_comparison>\n"
+        "Compare somente as opções já apresentadas e pesquise cada uma delas "
+        "separadamente. Não introduza alternativas novas; para cada opção, "
+        "apresente pontos a favor e cuidados relevantes.\n</contextual_comparison>"
+    )
+
+
 def _web_grounded_input(
     input_text: str,
     search_result: str,
@@ -1808,17 +1827,19 @@ class OrchestratorAgent(ToolUsingAgent):
             input if creation_requested else _chat_format_instruction(input)
         )
         choice_instruction = _choice_follow_up_instruction(decision.instruction)
+        comparison_instruction = _comparison_follow_up_instruction(decision.instruction)
+        option_follow_up = choice_instruction or comparison_instruction
         choice_options = (
             _choice_options(decision.instruction, context_messages)
-            if choice_instruction
+            if option_follow_up
             else []
         )
         prior_choice_research = (
             _choice_prior_research_context(decision.instruction, context_messages)
-            if choice_instruction
+            if option_follow_up
             else ""
         )
-        analysis_input += choice_instruction + prior_choice_research
+        analysis_input += choice_instruction + comparison_instruction + prior_choice_research
         if choice_options:
             analysis_input += (
                 "\n<choice_options>\n"
