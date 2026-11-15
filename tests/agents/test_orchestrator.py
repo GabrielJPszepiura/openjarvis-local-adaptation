@@ -321,6 +321,7 @@ class TestOrchestratorAgent:
         assert queries[0] == "os 5 melhores países para fazer intercâmbio."
         assert "O usuário pediu 5 itens" in grounded
         assert "uma única fonte traga a lista completa" in grounded
+        assert "não recuse uma lista" in grounded
 
     def test_generic_list_request_preserves_the_requested_item_kind(self):
         assert _requested_item_kind("Quais são cinco notebooks recomendados?") == "notebooks"
@@ -626,6 +627,27 @@ class TestOrchestratorAgent:
         assert "Apresenta dados turísticos usados na recomendação." in result.content
         assert "fonte secundária" not in result.content
         assert engine.generate.call_count == 0
+
+    def test_possessive_source_request_recovers_recorded_sources(self):
+        engine = _make_engine_no_tools("Não deve gerar uma nova resposta.")
+        web = _WebSearchStub()
+        agent = OrchestratorAgent(engine, "test-model", tools=[web])
+        context = AgentContext()
+        context.conversation.add(
+            Message(
+                role=Role.ASSISTANT,
+                content=(
+                    "Resposta anterior.\n<!-- openjarvis-research-sources:"
+                    '[{"title":"Fonte usada","url":"https://example.gov.br/dado",'
+                    '"summary":"Dado usado na resposta."}] -->'
+                ),
+            )
+        )
+
+        result = agent.run("Me passe suas fontes.", context=context)
+
+        assert web.calls == []
+        assert "[Fonte usada](https://example.gov.br/dado)" in result.content
 
     def test_source_question_without_ledger_does_not_generate_sources(self):
         engine = _make_engine_no_tools("Fonte inventada.")

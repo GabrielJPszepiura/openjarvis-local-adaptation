@@ -177,7 +177,8 @@ _LINK_REQUEST_RE = re.compile(
     r"(?:\b(?:quais?|que|mostre|envie|inclua|liste|informe|forneca|cite)\b"
     r".{0,48}\b(?:link|links|url|urls|fonte|fontes|referencia|referencias)\b|"
     r"\b(?:me\s+)?(?:passe|passa|mostre|envie|forneca|liste)\s+"
-    r"(?:as\s+)?(?:link|links|url|urls|fonte|fontes|referencia|referencias)"
+    r"(?:(?:as\s+)?suas\s+|as\s+|essas\s+)?"
+    r"(?:link|links|url|urls|fonte|fontes|referencia|referencias)"
     r"(?:\s+(?:da\s+|de\s+)?pesquisa)?\b|"
     r"\b(?:link|links|url|urls|fonte|fontes|referencia|referencias)\b\s*"
     r"(?:que\s+)?(?:voce\s+)?(?:usou|utilizou|consultou|usadas|utilizadas|consultadas)\b|"
@@ -1464,7 +1465,10 @@ def _web_grounded_input(
         + "uma única fonte traga a lista completa: componha a resposta a partir das "
         + "fontes pesquisadas. Só entregue menos itens se, mesmo após as consultas "
         + "complementares, faltar evidência para os demais; nesse caso explique qual "
-        + "cobertura faltou.\n</requested_list_coverage>"
+        + "cobertura faltou. Para assuntos não sensíveis, não recuse uma lista só "
+        + "porque nenhuma fonte traz todos os itens ou todos os preços exatos: use "
+        + "os candidatos concretos encontrados nas fontes e explique brevemente a "
+        + "variação de preço ou disponibilidade, se relevante.\n</requested_list_coverage>"
         if requested_count
         else ""
     )
