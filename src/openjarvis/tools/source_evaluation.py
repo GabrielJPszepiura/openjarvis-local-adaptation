@@ -92,8 +92,12 @@ class SourceProfileCache:
 def _matches_government_convention(host: str) -> bool:
     labels = host.split(".")
     return (
-        "gov" in labels
-        or "govt" in labels
+        # National administrations do not share one suffix.  These are common
+        # *domain conventions*, not an allow-list of countries: gov.br,
+        # gov.uk, gouv.fr, gob.es/gob.mx and go.jp all identify their public
+        # administration namespace by a label in the host.
+        any(label in {"gov", "govt", "gouv", "gob"} for label in labels)
+        or (len(labels) >= 2 and labels[-2] == "go" and len(labels[-1]) == 2)
         or (len(labels) >= 2 and labels[-2:] == ["gc", "ca"])
     )
 

@@ -7,8 +7,8 @@
  * available in chat responses.
  */
 export function escapeCurrencyDollars(markdown: string): string {
-  return markdown.replace(
-    /\b([A-Z]{1,3})\$(?=\s*(?:\d|[.,]\d))/g,
-    '$1\\$',
-  );
+  // A monetary value may be written as R$ 10, US$10, or simply $10.  Escape
+  // the dollar sign whenever a numeric amount follows it; `$x^2$` remains a
+  // math expression because it does not start with a number.
+  return markdown.replace(/(?<!\\)\$(?=\s*(?:\d|[.,]\d))/g, '\\$');
 }
