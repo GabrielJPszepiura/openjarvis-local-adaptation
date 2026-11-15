@@ -15,6 +15,7 @@ from openjarvis.agents.orchestrator import (
     _filter_research_evidence,
     _hide_unrequested_links,
     _hide_unretrieved_links,
+    _has_complete_requested_list,
     _choice_follow_up_instruction,
     _choice_options,
     _choice_prior_research_context,
@@ -23,6 +24,7 @@ from openjarvis.agents.orchestrator import (
     _research_context_marker,
     _requested_list_count,
     _requested_item_kind,
+    _list_completion_instruction,
     _presented_items,
     _source_ledger_marker,
     _web_grounded_input,
@@ -331,6 +333,22 @@ class TestOrchestratorAgent:
 
         assert len(queries) == 3
         assert "ainda responda com o melhor material encontrado" in grounded
+        assert "não diga que os dados de 2026 estão indisponíveis" in grounded
+
+    def test_bare_ranking_triggers_requested_list_completion(self):
+        request = "Pesquise 3 melhores países para turismo."
+        bare_ranking = "Estados Unidos, Itália e Portugal."
+        complete_list = (
+            "1. **Estados Unidos** — reúne cidades, parques e roteiros diversos.\n"
+            "2. **Itália** — combina patrimônio histórico e gastronomia.\n"
+            "3. **Portugal** — tem idioma acessível e boas opções culturais."
+        )
+
+        assert not _has_complete_requested_list(request, bare_ranking)
+        assert _has_complete_requested_list(request, complete_list)
+        repair = _list_completion_instruction(request, bare_ranking)
+        assert "exatamente 3 itens numerados" in repair
+        assert "nem diga que dados do ano não estão disponíveis" in repair
 
     def test_generic_list_request_preserves_the_requested_item_kind(self):
         assert _requested_item_kind("Quais são cinco notebooks recomendados?") == "notebooks"
@@ -696,10 +714,11 @@ class TestOrchestratorAgent:
             context=context,
         )
 
-        assert len(web.calls) == 1
-        query = web.calls[0]["query"]
-        assert query == "as vantagens e desvantagens: Canadá, Alemanha, Irlanda"
-        assert "Contexto da conversa" not in query
+        assert [call["query"] for call in web.calls] == [
+            "Canadá pesquise na web as vantagens e desvantagens desses paises",
+            "Alemanha pesquise na web as vantagens e desvantagens desses paises",
+            "Irlanda pesquise na web as vantagens e desvantagens desses paises",
+        ]
         messages = engine.generate.call_args.args[0]
         assert all(
             message.text != "Canadá, Alemanha e Irlanda são boas opções."
