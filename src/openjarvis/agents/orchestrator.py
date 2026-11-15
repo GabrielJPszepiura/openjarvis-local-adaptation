@@ -153,6 +153,7 @@ _COMMON_COUNTRY_NAMES = {
     "chile": "Chile",
     "china": "China",
     "coreia do sul": "Coreia do Sul",
+    "croacia": "Croácia",
     "dinamarca": "Dinamarca",
     "emirados arabes unidos": "Emirados Árabes Unidos",
     "espanha": "Espanha",
@@ -211,6 +212,10 @@ _MEDICAL_PRESCRIBING_RE = re.compile(
 )
 _RESEARCH_LEDGER_RE = re.compile(
     r"<!--\s*openjarvis-research-sources:(?P<payload>.*?)\s*-->",
+    re.DOTALL | re.IGNORECASE,
+)
+_RESEARCH_CONTEXT_RE = re.compile(
+    r"<!--\s*openjarvis-research-context:(?P<payload>.*?)\s*-->",
     re.DOTALL | re.IGNORECASE,
 )
 _MARKDOWN_URL_RE = re.compile(r"\[([^\]]+)]\(https?://[^\s)]+\)")
@@ -455,15 +460,44 @@ def _requested_item_kind(input_text: str) -> str | None:
     """Return an explicitly requested item kind for response-scope guidance."""
     text = _plain_text(input_text)
     for singular, plural in (
-        ("país", "países"),
+        ("pais", "paises"),
         ("cidade", "cidades"),
         ("produto", "produtos"),
         ("tratamento", "tratamentos"),
         ("estudo", "estudos"),
+        ("opcao", "opcoes"),
     ):
         if singular in text or plural in text:
             return plural
     return None
+
+
+def _research_ledger_from_message(message: Message) -> list[dict[str, str]]:
+    """Recover provenance from one specific assistant answer."""
+    match = _RESEARCH_LEDGER_RE.search(message.text)
+    if not match:
+        return []
+    try:
+        raw = json.loads(match.group("payload"))
+    except json.JSONDecodeError:
+        return []
+    if not isinstance(raw, list):
+        return []
+    sources: list[dict[str, str]] = []
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        title = str(item.get("title", "")).strip()
+        url = str(item.get("url", "")).strip()
+        if title and url.startswith(("https://", "http://")):
+            sources.append(
+                {
+                    "title": title,
+                    "url": url,
+                    "label": str(item.get("label", "")),
+                }
+            )
+    return sources
 
 
 def _research_ledger_from_context(messages: list[Message]) -> list[dict[str, str]]:
@@ -471,29 +505,7 @@ def _research_ledger_from_context(messages: list[Message]) -> list[dict[str, str
     for message in reversed(messages):
         if message.role != Role.ASSISTANT:
             continue
-        match = _RESEARCH_LEDGER_RE.search(message.text)
-        if not match:
-            continue
-        try:
-            raw = json.loads(match.group("payload"))
-        except json.JSONDecodeError:
-            continue
-        if not isinstance(raw, list):
-            continue
-        sources: list[dict[str, str]] = []
-        for item in raw:
-            if not isinstance(item, dict):
-                continue
-            title = str(item.get("title", "")).strip()
-            url = str(item.get("url", "")).strip()
-            if title and url.startswith(("https://", "http://")):
-                sources.append(
-                    {
-                        "title": title,
-                        "url": url,
-                        "label": str(item.get("label", "")),
-                    }
-                )
+        sources = _research_ledger_from_message(message)
         if sources:
             return sources
     return []
@@ -514,6 +526,135 @@ def _source_ledger_marker(sources: list[dict[str, object]]) -> str:
         return ""
     payload = json.dumps(values, ensure_ascii=False)
     return "\n<!-- openjarvis-research-sources:" + payload + " -->"
+
+
+def _presented_items(text: str) -> list[str]:
+    """Extract answer labels without treating ordinary prose as an option set."""
+    items: list[str] = []
+    patterns = (
+        _ORDERED_LIST_ITEM_RE,
+        re.compile(
+            r"^\s*#{1,6}\s*\d+[.)]?\s*(?:\*\*)?(?P<item>[^\n:*]{2,100})",
+            re.MULTILINE,
+        ),
+    )
+    for pattern in patterns:
+        for match in pattern.finditer(text):
+            item = re.sub(r"\s+", " ", match.group("item")).strip(" .,:;-")
+            if item and item not in items:
+                items.append(item)
+    return items
+
+
+def _research_context_marker(input_text: str, answer: str) -> str:
+    """Persist the option set that a researched answer introduced.
+
+    This is deliberately structured instead of relying on a later keyword
+    match.  A future "esses três países" can therefore find the country set
+    even if other subjects occurred in between.
+    """
+    kind = _requested_item_kind(input_text)
+    items = _presented_items(answer)
+    if kind == "paises":
+        items = _countries_from_context([Message(role=Role.ASSISTANT, content=answer)])
+    if not kind or len(items) < 2:
+        return ""
+    payload = json.dumps({"kind": kind, "items": items[:8]}, ensure_ascii=False)
+    return "\n<!-- openjarvis-research-context:" + payload + " -->"
+
+
+def _choice_reference(input_text: str) -> tuple[int | None, str | None]:
+    """Read the count and item type explicitly named by a choice follow-up."""
+    text = _plain_text(input_text)
+    count: int | None = None
+    match = re.search(
+        r"\b(?:entre|dentre)\s+(?:esses?|essas?|os|as)?\s*"
+        r"(?:(\d+)|(um|uma|dois|duas|tres|quatro|cinco))?",
+        text,
+    )
+    if match:
+        if match.group(1):
+            count = min(int(match.group(1)), 8)
+        elif match.group(2):
+            count = _NUMBER_WORD_COUNTS.get(match.group(2))
+    return count, _requested_item_kind(input_text)
+
+
+def _research_context_from_message(message: Message) -> dict[str, object] | None:
+    match = _RESEARCH_CONTEXT_RE.search(message.text)
+    if not match:
+        return None
+    try:
+        context = json.loads(match.group("payload"))
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(context, dict):
+        return None
+    kind = str(context.get("kind", ""))
+    items = context.get("items", [])
+    if not kind or not isinstance(items, list):
+        return None
+    return {"kind": kind, "items": [str(item) for item in items if str(item).strip()]}
+
+
+def _referenced_research_message(
+    input_text: str, messages: list[Message]
+) -> Message | None:
+    """Resolve a choice to its matching researched option set.
+
+    Explicit type (for example, ``três países``) is the strong anchor.  With
+    only ``esses três``, use a set only when it is the sole compatible one;
+    otherwise leave the reference unresolved rather than silently choosing a
+    different topic from the chat.
+    """
+    count, requested_kind = _choice_reference(input_text)
+    candidates: list[Message] = []
+    for message in reversed(messages):
+        if message.role != Role.ASSISTANT:
+            continue
+        recorded = _research_context_from_message(message)
+        if recorded:
+            if requested_kind and recorded["kind"] != requested_kind:
+                continue
+            if count and len(recorded["items"]) < count:
+                continue
+            candidates.append(message)
+            continue
+        # Compatibility path for earlier conversations, recorded before the
+        # structured marker existed.  It stays narrow: a country reference
+        # needs an actual multi-country answer, not a passing mention.
+        if requested_kind == "paises":
+            if len(_countries_from_context([message])) >= (count or 2):
+                candidates.append(message)
+        elif not requested_kind and len(_presented_items(message.text)) >= (count or 2):
+            candidates.append(message)
+    if not candidates:
+        return None
+    if requested_kind:
+        return candidates[0]
+    return candidates[0] if len(candidates) == 1 else None
+
+
+def _choice_prior_research_context(input_text: str, messages: list[Message]) -> str:
+    """Provide only the resolved earlier research, never unrelated chat turns."""
+    message = _referenced_research_message(input_text, messages)
+    if message is None:
+        return ""
+    body = _RESEARCH_LEDGER_RE.sub("", message.text)
+    body = _RESEARCH_CONTEXT_RE.sub("", body).strip()
+    body = body[:3000].rstrip()
+    sources = _research_ledger_from_message(message)
+    source_lines = "\n".join(
+        f"- {source['title']}: {source['url']}" for source in sources[:6]
+    )
+    return (
+        "\n<prior_research_context>\n"
+        "Pesquisa anterior vinculada às opções referidas neste pedido. Use-a "
+        "junto da pesquisa nova; não use nenhuma outra parte do histórico.\n"
+        + body
+        + ("\nFontes registradas:\n" + source_lines if source_lines else "")
+        + "\n</prior_research_context>"
+    )
 
 
 def _format_recorded_sources(sources: list[dict[str, str]]) -> str:
@@ -632,7 +773,17 @@ def _web_search_query(
     if not _CONTEXTUAL_WEB_REFERENCE_RE.search(_plain_text(query)):
         return query
 
-    countries = _countries_from_context(context_messages or [])
+    # Choice follow-ups must resolve their entities from the linked research
+    # answer, not from every mention of a country in the chat history.
+    referenced = _referenced_research_message(query, context_messages or [])
+    if referenced:
+        countries = _countries_from_context([referenced])
+    elif _choice_follow_up_instruction(query):
+        # An ambiguous choice must not pull country names from an unrelated
+        # subject. The response layer will ask the user to identify the set.
+        countries = []
+    else:
+        countries = _countries_from_context(context_messages or [])
     if not countries:
         return query
     topic = _CONTEXTUAL_COUNTRIES_RE.sub("", _plain_text(query)).strip(" .,:;")
@@ -1122,7 +1273,8 @@ def _choice_follow_up_instruction(input_text: str) -> str:
     return (
         "\n<choice_follow_up>\n"
         "Esta é uma escolha entre opções já apresentadas na conversa. Use a "
-        "pesquisa para reforçar a decisão, mas não repita a apresentação "
+        "pesquisa anterior vinculada a essas opções e a nova pesquisa para "
+        "reforçar a decisão, mas não repita a apresentação "
         "completa de todas as opções. Comece escolhendo claramente uma única "
         "opção. Desenvolva mais essa escolhida com os detalhes novos e úteis "
         "para o critério do usuário. Depois, explique de forma breve por que "
@@ -1141,6 +1293,7 @@ def _web_grounded_input(
     sensitive_query: bool = False,
     research_queries: list[str] | None = None,
     safe_source_count: int = 0,
+    prior_research_context: str = "",
 ) -> str:
     """Attach search evidence while keeping source display user-controlled."""
     source_instruction = (
@@ -1199,9 +1352,16 @@ def _web_grounded_input(
         + "\n\n<web_search_results>\n"
         + search_result
         + "\n</web_search_results>\n"
-        + "Use somente os resultados reais acima para afirmações factuais. "
-        + "Ignore fatos, números e conclusões de mensagens anteriores: eles não "
-        + "são evidência para esta resposta. "
+        + (
+            "Use os resultados reais acima junto da pesquisa anterior vinculada "
+            "e delimitada no pedido. Em caso de divergência, informe-a e priorize "
+            "a evidência mais atual ou mais direta. Não use nenhuma outra mensagem "
+            "do histórico como evidência. "
+            if prior_research_context
+            else "Use somente os resultados reais acima para afirmações factuais. "
+            "Ignore fatos, números e conclusões de mensagens anteriores: eles não "
+            "são evidência para esta resposta. "
+        )
         + source_instruction
         + " "
         + _web_date_context()
@@ -1502,7 +1662,21 @@ class OrchestratorAgent(ToolUsingAgent):
         analysis_input = (
             input if creation_requested else _chat_format_instruction(input)
         )
-        analysis_input += _choice_follow_up_instruction(decision.instruction)
+        choice_instruction = _choice_follow_up_instruction(decision.instruction)
+        prior_choice_research = (
+            _choice_prior_research_context(decision.instruction, context_messages)
+            if choice_instruction
+            else ""
+        )
+        analysis_input += choice_instruction + prior_choice_research
+        if choice_instruction and context_messages and not prior_choice_research:
+            analysis_input += (
+                "\n<choice_reference_resolution>\n"
+                "Há mais de um conjunto possível, ou o conjunto referido não "
+                "está identificado no histórico. Peça ao usuário que diga quais "
+                "são as opções; não escolha nem misture assuntos por suposição."
+                "\n</choice_reference_resolution>"
+            )
         if creation_requested and requested_format is not None:
             if documents:
                 self._emit_status(
@@ -1576,6 +1750,7 @@ class OrchestratorAgent(ToolUsingAgent):
                 sensitive_query=sensitive_query,
                 research_queries=web_result.metadata.get("research_queries"),
                 safe_source_count=safe_source_count,
+                prior_research_context=prior_choice_research,
             )
 
         if self._mode == "structured":
@@ -1652,6 +1827,9 @@ class OrchestratorAgent(ToolUsingAgent):
             # Commercial material remains available as a complement, but is
             # visibly labelled instead of being silently promoted to safe.
             result.content += _commercial_source_note(source_records)
+            result.content += _research_context_marker(
+                decision.instruction, result.content
+            )
             result.content += _source_ledger_marker(source_records)
             result.metadata["research_sources"] = source_records
 

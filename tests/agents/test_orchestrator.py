@@ -16,9 +16,13 @@ from openjarvis.agents.orchestrator import (
     _hide_unrequested_links,
     _hide_unretrieved_links,
     _choice_follow_up_instruction,
+    _choice_prior_research_context,
     _links_requested,
     _needs_evidence_research,
+    _research_context_marker,
+    _source_ledger_marker,
     _web_grounded_input,
+    _web_search_query,
     _web_search_queries,
 )
 from openjarvis.core.events import EventBus, EventType
@@ -221,6 +225,71 @@ class TestOrchestratorAgent:
         assert "uma única opção" in instruction
         assert "não repita a apresentação completa" in instruction
         assert _choice_follow_up_instruction("Compare Japão e Croácia.") == ""
+
+    def test_choice_uses_the_matching_prior_research_not_the_latest_topic(self):
+        travel_answer = (
+            "1. **Japão**: cultura e transporte.\n"
+            "2. **Croácia**: litoral e história.\n"
+            "3. **Espanha**: cidades e gastronomia."
+        )
+        travel_instruction = "Quais são três países para uma viagem de turismo?"
+        debt_answer = "A dívida pública brasileira é acompanhada pelo Tesouro."
+        messages = [
+            Message(
+                role=Role.ASSISTANT,
+                content=(
+                    travel_answer
+                    + _research_context_marker(travel_instruction, travel_answer)
+                    + _source_ledger_marker(
+                        [{"title": "Turismo Japão", "url": "https://tour.example/jp"}]
+                    )
+                ),
+            ),
+            Message(role=Role.USER, content="Agora explique a dívida pública do Brasil."),
+            Message(
+                role=Role.ASSISTANT,
+                content=(
+                    debt_answer
+                    + _research_context_marker(
+                        "Explique dados sobre a dívida pública do Brasil.", debt_answer
+                    )
+                ),
+            ),
+        ]
+        request = "Entre esses três países, qual você indicaria para uma primeira viagem?"
+
+        prior = _choice_prior_research_context(request, messages)
+        query = _web_search_query(request, messages)
+
+        assert "Japão" in prior
+        assert "Croácia" in prior
+        assert "dívida pública" not in prior
+        assert "Turismo Japão" in prior
+        assert "Japão" in query
+        assert "Croácia" in query
+        assert "Brasil" not in query
+
+    def test_ambiguous_choice_does_not_merge_two_untyped_option_sets(self):
+        first = (
+            "1. **Alpha**: primeiro.\n2. **Beta**: segundo.\n"
+            "3. **Gama**: terceiro."
+        )
+        second = (
+            "1. **Xenon**: primeiro.\n2. **Ypsilon**: segundo.\n"
+            "3. **Zeta**: terceiro."
+        )
+        messages = [
+            Message(
+                role=Role.ASSISTANT,
+                content=first + _research_context_marker("Liste três opções.", first),
+            ),
+            Message(
+                role=Role.ASSISTANT,
+                content=second + _research_context_marker("Liste três opções.", second),
+            ),
+        ]
+
+        assert _choice_prior_research_context("Entre esses três, qual é melhor?", messages) == ""
 
     def test_explicit_word_request_creates_file_when_model_omits_tool(self, tmp_path):
         engine = _make_engine_no_tools("Resumo produzido a partir das planilhas.")
