@@ -1,5 +1,7 @@
 """Tests for the persistent fact store (openjarvis.memory.store)."""
 
+# Modified by the OpenJarvis local adaptation (2026-11-13): source deletion coverage.
+
 from __future__ import annotations
 
 import json
@@ -74,6 +76,15 @@ def test_add_dedupes_case_insensitive(tmp_path):
     assert store.add("Likes coffee") is True
     assert store.add("likes coffee") is False  # duplicate
     assert store.count() == 1
+
+
+def test_delete_by_source_preserves_other_facts(tmp_path):
+    store = LocalFactStore(tmp_path / "facts.jsonl")
+    store.add("Fact from chat A", source="conversation:chat-a")
+    store.add("Fact from chat B", source="conversation:chat-b")
+
+    assert store.delete_by_source("conversation:chat-a") == 1
+    assert [fact.text for fact in store.list()] == ["Fact from chat B"]
 
 
 def test_add_skips_empty(tmp_path):

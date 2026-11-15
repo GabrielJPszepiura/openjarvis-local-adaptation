@@ -1,3 +1,4 @@
+# Modified by Gabriel_JP for the OpenJarvis local adaptation (2026-11-15).
 from __future__ import annotations
 
 from pathlib import Path
@@ -42,6 +43,31 @@ def test_create_pdf_document(tmp_path: Path) -> None:
     assert output.read_bytes().startswith(b"%PDF")
 
 
+def test_pdf_renders_markdown_tables_and_inline_bold(tmp_path: Path) -> None:
+    pytest.importorskip("reportlab")
+    reader_module = pytest.importorskip("PyPDF2")
+    result = CreateDocumentTool([str(tmp_path)]).execute(
+        filename="tabela.pdf",
+        format="pdf",
+        title="Resumo financeiro",
+        content=(
+            "# Indicadores\n\n"
+            "| Mês | Receita |\n"
+            "| --- | ---: |\n"
+            "| Janeiro | **R$ 12.500** |\n\n"
+            "**Resultado:** positivo\n\n---\n\n- Ponto principal"
+        ),
+    )
+
+    assert result.success is True
+    reader = reader_module.PdfReader(tmp_path / "tabela.pdf")
+    text = "\n".join(page.extract_text() or "" for page in reader.pages)
+    assert "Mês" in text
+    assert "Janeiro" in text
+    assert "| Janeiro" not in text
+    assert "**Resultado:**" not in text
+
+
 def test_replaces_generic_timestamp_filename_with_document_subject(tmp_path: Path) -> None:
     pytest.importorskip("docx")
     result = CreateDocumentTool([str(tmp_path)]).execute(
@@ -70,6 +96,32 @@ def test_create_spreadsheet(tmp_path: Path) -> None:
     sheet = workbook["Produtos"]
     assert sheet["A2"].value == "Café"
     assert sheet["B3"].value == 2
+
+
+def test_financial_spreadsheet_has_typed_values_formulas_and_summary(tmp_path: Path) -> None:
+    openpyxl = pytest.importorskip("openpyxl")
+    result = CreateSpreadsheetTool([str(tmp_path)]).execute(
+        filename="financeiro.xlsx",
+        sheet_name="Dados",
+        title="Controle financeiro",
+        columns=["Mês", "Receitas", "Despesas", "Saldo acumulado"],
+        rows=[
+            ["Janeiro", "R$ 12.500,00", "R$ 2.800,00", "R$ 9.700,00"],
+            ["Fevereiro", "R$ 15.200,00", "R$ 3.100,00", "R$ 18.800,00"],
+        ],
+        include_summary=True,
+    )
+
+    assert result.success is True
+    workbook = openpyxl.load_workbook(tmp_path / "financeiro.xlsx", data_only=False)
+    data = workbook["Dados"]
+    summary = workbook["Resumo"]
+    assert data["B3"].value == 12500.0
+    assert data["D3"].value == "=B3-C3"
+    assert data["D4"].value == "=D3+B4-C4"
+    assert data["B3"].number_format == "R$ #,##0.00"
+    assert summary["B4"].value == "=SUM('Dados'!B3:B4)"
+    assert summary["B6"].value == "=B4-B5"
 
 
 def test_numbers_duplicate_document_without_overwriting(tmp_path: Path) -> None:

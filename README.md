@@ -1,3 +1,5 @@
+<!-- Modified by Gabriel_JP for the OpenJarvis local adaptation (2026-11-15). -->
+
 # OpenJarvis
 
 Assistente de IA local em português, com interface web, pesquisa na internet,
@@ -20,6 +22,10 @@ com pesquisa web contextual, fontes rastreáveis e geração de arquivos.
 - Mudança de assunto com nova pesquisa, sem reutilizar fatos do tema anterior
   como evidência.
 - Criação de documentos Word para download a partir de pesquisas e conteúdos do chat.
+- Exclusão vinculada: chats novos recebem um ID; ao apagá-los, o sistema remove
+  rastros, memória automática e arquivos gerados associados. O compartilhamento de contexto entre
+  chats é opcional e vem desativado por padrão.
+- Logs técnicos do servidor são arquivados por sessão e mantidos por até 30 dias.
 
 ## Estado atual
 
@@ -109,4 +115,5 @@ mudança de assunto.
 
 O código-base OpenJarvis é distribuído sob a licença Apache 2.0. Esta versão
 mantém a licença aplicável e reconhece o projeto original como base open source.
+As adaptações locais são de Gabriel_JP e estão registradas em [NOTICE](NOTICE).
 Consulte [LICENSE](LICENSE) e o [repositório original](https://github.com/open-jarvis/OpenJarvis).

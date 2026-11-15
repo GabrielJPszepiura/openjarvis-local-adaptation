@@ -1,5 +1,7 @@
 """Pydantic request/response models for the OpenAI-compatible API."""
 
+# Modified by the OpenJarvis local adaptation (2026-11-13): conversation ID support.
+
 from __future__ import annotations
 
 import time
@@ -28,6 +30,10 @@ class ChatCompletionRequest(BaseModel):
     max_tokens: int = 1024
     stream: bool = False
     tools: Optional[List[Dict[str, Any]]] = None
+    # The web UI owns conversations locally, but each request carries its
+    # stable ID so backend traces and generated files can be deleted with the
+    # conversation that created them.
+    conversation_id: Optional[str] = Field(default=None, max_length=128)
 
 
 # ---------------------------------------------------------------------------

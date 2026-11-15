@@ -1,4 +1,5 @@
 import type { ChatAttachment, GeneratedFile, ModelInfo, SavingsData, ServerInfo } from '../types';
+// Modified by the OpenJarvis local adaptation (2026-11-13): conversation purge API.
 import { SUPABASE_ANON_KEY, SUPABASE_URL } from './supabase';
 import { serializeToolCallArguments } from './tool-call';
 
@@ -119,6 +120,24 @@ export const apiFetch = (
   );
   return fetch(`${getBase()}${path}`, { ...init, headers });
 };
+
+/** Delete backend data associated with a locally deleted conversation. */
+export async function deleteConversationData(conversationId: string): Promise<void> {
+  const response = await apiFetch(`/v1/conversations/${encodeURIComponent(conversationId)}`, {
+    method: 'DELETE',
+  });
+  if (!response.ok) {
+    throw new Error(`Could not delete conversation data: ${response.status}`);
+  }
+}
+
+/** Delete all backend data that belongs to local chat history. */
+export async function deleteAllConversationData(): Promise<void> {
+  const response = await apiFetch('/v1/conversations', { method: 'DELETE' });
+  if (!response.ok) {
+    throw new Error(`Could not clear conversation data: ${response.status}`);
+  }
+}
 
 async function tauriInvoke<T>(command: string, args: Record<string, unknown> = {}): Promise<T> {
   const { invoke } = await import('@tauri-apps/api/core');

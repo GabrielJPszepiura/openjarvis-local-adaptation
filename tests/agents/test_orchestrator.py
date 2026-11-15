@@ -1,4 +1,5 @@
 """Tests for the OrchestratorAgent."""
+# Modified by Gabriel_JP for the OpenJarvis local adaptation (2026-11-15).
 
 from __future__ import annotations
 
@@ -11,27 +12,29 @@ from openjarvis.agents.orchestrator import (
     OrchestratorAgent,
     _attachment_research_terms,
     _chat_format_instruction,
-    _countries_from_context,
-    _filter_research_evidence,
-    _hide_unrequested_links,
-    _hide_unretrieved_links,
-    _has_complete_requested_list,
     _choice_follow_up_instruction,
-    _comparison_follow_up_instruction,
     _choice_options,
     _choice_prior_research_context,
-    _links_requested,
-    _needs_evidence_research,
-    _research_context_marker,
-    _requested_list_count,
-    _requested_item_kind,
-    _list_completion_instruction,
-    _presented_items,
-    _source_ledger_marker,
+    _comparison_follow_up_instruction,
+    _countries_from_context,
+    _filter_research_evidence,
     _format_recorded_sources,
+    _has_complete_requested_list,
+    _hide_unrequested_links,
+    _hide_unretrieved_links,
+    _links_requested,
+    _list_completion_instruction,
+    _needs_evidence_research,
+    _presented_items,
+    _requested_item_kind,
+    _requested_list_count,
+    _research_context_marker,
+    _source_ledger_marker,
+    _source_records,
+    _spreadsheet_payload_from_content,
     _web_grounded_input,
-    _web_search_query,
     _web_search_queries,
+    _web_search_query,
 )
 from openjarvis.core.events import EventBus, EventType
 from openjarvis.core.types import Conversation, Message, Role, ToolResult
@@ -234,6 +237,76 @@ class TestOrchestratorAgent:
         assert "não repita a apresentação completa" in instruction
         assert _choice_follow_up_instruction("Compare Japão e Croácia.") == ""
 
+    def test_source_records_deduplicate_repeated_urls(self):
+        records = _source_records(
+            {
+                "sources": [
+                    {"title": "Primeira", "url": "https://example.test/a"},
+                    {"title": "Repetida", "url": "https://example.test/a"},
+                    {"title": "Segunda", "url": "https://example.test/b"},
+                ],
+                "source_profiles": [],
+            }
+        )
+
+        assert [record["url"] for record in records] == [
+            "https://example.test/a",
+            "https://example.test/b",
+        ]
+
+    def test_contextual_choice_repairs_an_outside_winner_before_delivery(self):
+        prior_answer = (
+            "1. **China** — cultura.\n"
+            "2. **Tailândia** — praias.\n"
+            "3. **Portugal** — história."
+        )
+        engine = _make_engine_no_tools()
+        engine.generate.side_effect = [
+            {
+                "content": "Minha indicação é Brasil. China ficou atrás.",
+                "usage": {
+                    "prompt_tokens": 5,
+                    "completion_tokens": 3,
+                    "total_tokens": 8,
+                },
+                "model": "test-model",
+                "finish_reason": "stop",
+            },
+            {
+                "content": (
+                    "Minha indicação: **Portugal**. É uma opção prática para "
+                    "iniciantes; China e Tailândia ficaram atrás neste critério."
+                ),
+                "usage": {
+                    "prompt_tokens": 5,
+                    "completion_tokens": 3,
+                    "total_tokens": 8,
+                },
+                "model": "test-model",
+                "finish_reason": "stop",
+            },
+        ]
+        agent = OrchestratorAgent(engine, "test-model")
+        context = AgentContext()
+        context.conversation.add(
+            Message(
+                role=Role.ASSISTANT,
+                content=prior_answer
+                + _research_context_marker(
+                    "Pesquise 3 melhores países para turismo.", prior_answer
+                ),
+            )
+        )
+
+        result = agent.run(
+            "Entre esses três países, qual você indicaria para iniciantes?",
+            context=context,
+        )
+
+        assert result.content.startswith("Minha indicação: **Portugal**")
+        assert result.metadata["contextual_option_repair"] is True
+        assert engine.generate.call_count == 2
+
     def test_option_record_prefers_numbered_items_over_category_headings(self):
         answer = (
             "### Opções econômicas\n"
@@ -261,7 +334,9 @@ class TestOrchestratorAgent:
                     )
                 ),
             ),
-            Message(role=Role.USER, content="Agora explique a dívida pública do Brasil."),
+            Message(
+                role=Role.USER, content="Agora explique a dívida pública do Brasil."
+            ),
             Message(
                 role=Role.ASSISTANT,
                 content=(
@@ -272,7 +347,9 @@ class TestOrchestratorAgent:
                 ),
             ),
         ]
-        request = "Entre esses três países, qual você indicaria para uma primeira viagem?"
+        request = (
+            "Entre esses três países, qual você indicaria para uma primeira viagem?"
+        )
 
         prior = _choice_prior_research_context(request, messages)
         query = _web_search_query(request, messages)
@@ -293,13 +370,9 @@ class TestOrchestratorAgent:
         ]
 
     def test_ambiguous_choice_does_not_merge_two_untyped_option_sets(self):
-        first = (
-            "1. **Alpha**: primeiro.\n2. **Beta**: segundo.\n"
-            "3. **Gama**: terceiro."
-        )
+        first = "1. **Alpha**: primeiro.\n2. **Beta**: segundo.\n3. **Gama**: terceiro."
         second = (
-            "1. **Xenon**: primeiro.\n2. **Ypsilon**: segundo.\n"
-            "3. **Zeta**: terceiro."
+            "1. **Xenon**: primeiro.\n2. **Ypsilon**: segundo.\n3. **Zeta**: terceiro."
         )
         messages = [
             Message(
@@ -312,7 +385,10 @@ class TestOrchestratorAgent:
             ),
         ]
 
-        assert _choice_prior_research_context("Entre esses três, qual é melhor?", messages) == ""
+        assert (
+            _choice_prior_research_context("Entre esses três, qual é melhor?", messages)
+            == ""
+        )
 
     def test_requested_five_item_list_gets_complementary_research_coverage(self):
         request = "Pesquise os 5 melhores países para fazer intercâmbio."
@@ -352,6 +428,29 @@ class TestOrchestratorAgent:
         assert "exatamente 3 itens numerados" in repair
         assert "nem diga que dados do ano não estão disponíveis" in repair
 
+    def test_explicit_list_subject_precedes_incidental_option_word(self):
+        assert (
+            _requested_item_kind(
+                "Pesquise cinco notebooks concretos para programação e explique cada opção."
+            )
+            == "notebooks"
+        )
+
+    def test_notebook_request_rejects_processor_categories_as_items(self):
+        request = "Quais são cinco notebooks para programação com orçamento baixo?"
+        generic_categories = (
+            "1. **Notebooks com Intel Atom** — baixo consumo.\n"
+            "2. **Notebooks com AMD Ryzen** — desempenho razoável.\n"
+            "3. **Notebooks com Intel Core i5** — opção intermediária.\n"
+            "4. **Notebooks com Ryzen 3** — custo-benefício.\n"
+            "5. **Notebooks com Intel Core i3** — uso leve."
+        )
+
+        assert not _has_complete_requested_list(request, generic_categories)
+        assert "marca + linha/modelo" in _list_completion_instruction(
+            request, generic_categories
+        )
+
     def test_comparison_recovers_option_set_after_a_source_listing(self):
         answer = (
             "1. **Estados Unidos** — variedade de roteiros.\n"
@@ -383,7 +482,9 @@ class TestOrchestratorAgent:
         )
 
         assert _choice_options(comparison, messages) == [
-            "Estados Unidos", "Itália", "Portugal"
+            "Estados Unidos",
+            "Itália",
+            "Portugal",
         ]
         assert _comparison_follow_up_instruction(comparison)
         assert _web_search_queries(comparison, messages) == [
@@ -393,7 +494,10 @@ class TestOrchestratorAgent:
         ]
 
     def test_generic_list_request_preserves_the_requested_item_kind(self):
-        assert _requested_item_kind("Quais são cinco notebooks recomendados?") == "notebooks"
+        assert (
+            _requested_item_kind("Quais são cinco notebooks recomendados?")
+            == "notebooks"
+        )
         assert _requested_item_kind("Liste 5 bancos atuais.") == "bancos"
 
     def test_explicit_word_request_creates_file_when_model_omits_tool(self, tmp_path):
@@ -482,9 +586,7 @@ class TestOrchestratorAgent:
         assert "não disponibilizei um arquivo parcial" in result.content
         assert "Versão mais curta" in result.content
         assert "Documento por partes" in result.content
-        assert result.metadata["artifact_retry_suggestion"] == (
-            "shorter_or_sectioned"
-        )
+        assert result.metadata["artifact_retry_suggestion"] == ("shorter_or_sectioned")
 
     def test_requested_document_title_is_preserved(self, tmp_path):
         engine = _make_engine_no_tools("Texto explicando o OpenJarvis.")
@@ -519,6 +621,31 @@ class TestOrchestratorAgent:
         assert result.metadata["tool_route"] == "artifact_only"
         assert result.tool_results[0].tool_name == "create_spreadsheet"
         assert result.tool_results[0].metadata["format"] == "xlsx"
+        import openpyxl
+
+        workbook = openpyxl.load_workbook(
+            tmp_path / result.tool_results[0].metadata["filename"], data_only=False
+        )
+        sheet = workbook["Dados"]
+        assert sheet["A2"].value == "País"
+        assert sheet["B3"].value == "Intercâmbio"
+
+    def test_spreadsheet_fallback_extracts_markdown_cells_not_text_lines(self):
+        content = (
+            "# Controle financeiro\n\n"
+            "| Mês | Receitas | Despesas | Saldo acumulado |\n"
+            "| --- | ---: | ---: | ---: |\n"
+            "| Janeiro | R$ 12.500,00 | R$ 2.800,00 | R$ 9.700,00 |\n"
+            "| Fevereiro | R$ 15.200,00 | R$ 3.100,00 | R$ 18.800,00 |"
+        )
+
+        columns, rows = _spreadsheet_payload_from_content(content)
+
+        assert columns == ["Mês", "Receitas", "Despesas", "Saldo acumulado"]
+        assert rows == [
+            ["Janeiro", "R$ 12.500,00", "R$ 2.800,00", "R$ 9.700,00"],
+            ["Fevereiro", "R$ 15.200,00", "R$ 3.100,00", "R$ 18.800,00"],
+        ]
 
     def test_explicit_web_request_forces_search_before_generation(self):
         engine = _make_engine_no_tools("Pesquisa concluída.")
@@ -837,8 +964,7 @@ class TestOrchestratorAgent:
             Message(
                 role=Role.ASSISTANT,
                 content=(
-                    "A inflação brasileira entre 1994 e 2005 caiu após o "
-                    "Plano Real."
+                    "A inflação brasileira entre 1994 e 2005 caiu após o Plano Real."
                 ),
             )
         )
@@ -960,9 +1086,7 @@ Kaplan\tCanadá
             "França vantagens e desvantagens",
             "Espanha vantagens e desvantagens",
         ]
-        assert {
-            call["query"] for call in web.calls[3:]
-        } == {
+        assert {call["query"] for call in web.calls[3:]} == {
             "https://gov.example/japão",
             "https://gov.example/frança",
             "https://gov.example/espanha",
@@ -1409,9 +1533,7 @@ Responda no mesmo idioma usado pelo usuário na solicitação atual."""
         result = agent.run(request)
 
         assert result.metadata["tool_route"] == "artifact_only"
-        assert [item.tool_name for item in result.tool_results] == [
-            "create_document"
-        ]
+        assert [item.tool_name for item in result.tool_results] == ["create_document"]
         assert result.tool_results[0].success is True
 
     def test_user_can_explicitly_combine_attachments_web_and_word(self, tmp_path):
@@ -1545,13 +1667,9 @@ Canadá\tBolsa Horizonte
         result = agent.run(request)
 
         assert result.metadata["tool_route"] == "artifact_only"
-        assert [item.tool_name for item in result.tool_results] == [
-            "create_document"
-        ]
+        assert [item.tool_name for item in result.tool_results] == ["create_document"]
 
-    def test_web_negation_overrides_document_section_named_web_research(
-        self, tmp_path
-    ):
+    def test_web_negation_overrides_document_section_named_web_research(self, tmp_path):
         engine = _make_engine_no_tools(
             "# OpenJarvis personalizado\n\n"
             "## 1. Objetivo\n\nDescrição suficientemente detalhada do projeto.\n\n"
@@ -1572,9 +1690,7 @@ Não pesquise na internet e use somente o contexto desta conversa."""
         result = agent.run(request)
 
         assert result.metadata["tool_route"] == "artifact_only"
-        assert [item.tool_name for item in result.tool_results] == [
-            "create_document"
-        ]
+        assert [item.tool_name for item in result.tool_results] == ["create_document"]
 
     def test_explicit_artifact_negation_answers_only_in_chat(self, tmp_path):
         engine = _make_engine_no_tools("Resumo exibido somente no chat.")

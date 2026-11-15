@@ -1,3 +1,4 @@
+// Modified by Gabriel_JP for the OpenJarvis local adaptation (2026-11-15).
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { Bell, CheckCircle, ChevronDown, ChevronUp, Clock, XCircle } from 'lucide-react';
 import { approveAction, denyAction, fetchPendingApprovals } from '../lib/api';
@@ -75,7 +76,7 @@ export function ApprovalBell() {
   const count = approvals.length;
 
   return (
-    <div ref={containerRef} className="fixed top-2 right-3 z-40">
+    <div ref={containerRef} className="relative z-40 shrink-0">
       {/* Bell trigger */}
       <button
         onClick={() => setOpen(o => !o)}
@@ -106,7 +107,7 @@ export function ApprovalBell() {
         <div
           className="absolute right-0 top-full mt-1 rounded-xl shadow-2xl overflow-hidden flex flex-col"
           style={{
-            width: '340px',
+            width: 'min(340px, calc(100vw - 2rem))',
             maxHeight: '500px',
             background: 'var(--color-bg-secondary)',
             border: '1px solid var(--color-border)',

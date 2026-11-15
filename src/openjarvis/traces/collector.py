@@ -1,5 +1,7 @@
 """TraceCollector — wraps any BaseAgent to record interaction traces."""
 
+# Modified by the OpenJarvis local adaptation (2026-11-13): conversation trace ownership.
+
 from __future__ import annotations
 
 import time
@@ -36,10 +38,12 @@ class TraceCollector:
         *,
         store: Optional[TraceStore] = None,
         bus: Optional[EventBus] = None,
+        conversation_id: str = "",
     ) -> None:
         self._agent = agent
         self._store = store
         self._bus = bus
+        self._conversation_id = conversation_id
         self._current_steps: list[TraceStep] = []
         self._current_model: str = ""
         self._current_engine: str = ""
@@ -91,6 +95,11 @@ class TraceCollector:
             messages=messages,
             started_at=started_at,
             ended_at=ended_at,
+            metadata=(
+                {"conversation_id": self._conversation_id}
+                if self._conversation_id
+                else {}
+            ),
         )
         # Recompute totals from steps
         for step in trace.steps:
@@ -235,6 +244,7 @@ def record_response_trace(
     agent: str = "server",
     started_at: float,
     ended_at: float,
+    conversation_id: str = "",
 ) -> Optional[Trace]:
     """Persist a minimal single-step ``Trace`` for a non-agent response.
 
@@ -259,6 +269,11 @@ def record_response_trace(
             result=result,
             started_at=started_at,
             ended_at=ended_at,
+            metadata=(
+                {"conversation_id": conversation_id}
+                if conversation_id
+                else {}
+            ),
             steps=[
                 TraceStep(
                     step_type=StepType.RESPOND,

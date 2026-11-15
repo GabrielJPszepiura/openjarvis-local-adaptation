@@ -1,3 +1,4 @@
+// Modified by Gabriel_JP for the OpenJarvis local adaptation (2026-11-15).
 import { Brain, CircleDot, Wrench } from 'lucide-react';
 import { useAppStore } from '../../lib/store';
 
@@ -73,7 +74,7 @@ export function AssistantPresence() {
     <aside
       aria-live="polite"
       aria-label={`Estado do assistente: ${presence.label}`}
-      className="absolute right-5 top-5 z-10 flex items-center gap-3 rounded-2xl border px-3 py-2 shadow-lg backdrop-blur-md"
+      className="z-10 flex shrink-0 items-center gap-3 rounded-2xl border px-3 py-2 shadow-lg backdrop-blur-md"
       style={{ background: 'color-mix(in srgb, var(--color-surface) 82%, transparent)' }}
     >
       <div className={`relative flex size-9 items-center justify-center rounded-full border ${style.ring}`}>

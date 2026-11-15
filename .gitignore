@@ -72,6 +72,11 @@ frontend/tsconfig.tsbuildinfo
 
 # Local deliverables and render checks
 artifacts/
+tmp/
+
+# Modified by the OpenJarvis local adaptation (2026-11-14): backups stay local
+# and must never be committed.
+backups/
 
 # Desktop
 desktop/node_modules/

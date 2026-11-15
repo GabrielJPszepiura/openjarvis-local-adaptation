@@ -1,10 +1,12 @@
 import type { ResearchEvent, SSEEvent } from '../types';
+// Modified by the OpenJarvis local adaptation (2026-11-13): conversation trace ID transport.
 import { getBase, authHeaders } from './api';
 
 export interface ChatRequest {
   model: string;
   messages: Array<{ role: string; content: string }>;
   stream: true;
+  conversation_id?: string;
   temperature?: number;
   max_tokens?: number;
 }

@@ -1,5 +1,7 @@
 """Tests for the trace SQLite store."""
 
+# Modified by the OpenJarvis local adaptation (2026-11-13): conversation purge coverage.
+
 from __future__ import annotations
 
 import time
@@ -226,4 +228,45 @@ class TestTraceStore:
         assert retrieved is not None
         assert retrieved.metadata["key"] == "value"
         assert retrieved.metadata["nested"] == [1, 2, 3]
+        store.close()
+
+    def test_delete_conversation_removes_only_linked_traces_and_artifacts(
+        self, tmp_path: Path
+    ) -> None:
+        store = TraceStore(tmp_path / "test.db")
+        kept = _make_trace(query="keep")
+        deleted = _make_trace(query="delete")
+        deleted.metadata = {"conversation_id": "conversation-a"}
+        store.save(kept)
+        store.save(deleted)
+        store.register_generated_artifacts(
+            "conversation-a", ["report.docx", "../unsafe.docx"], trace_id=deleted.trace_id
+        )
+
+        filenames = store.delete_conversation("conversation-a")
+
+        assert filenames == ["report.docx"]
+        assert store.get(deleted.trace_id) is None
+        assert store.get(kept.trace_id) is not None
+        assert store.count() == 1
+        store.close()
+
+    def test_delete_all_conversations_removes_legacy_and_linked_data(
+        self, tmp_path: Path
+    ) -> None:
+        store = TraceStore(tmp_path / "test.db")
+        legacy = _make_trace(query="legacy")
+        linked = _make_trace(query="linked")
+        linked.metadata = {"conversation_id": "conversation-a"}
+        store.save(legacy)
+        store.save(linked)
+        store.register_generated_artifacts(
+            "conversation-a", ["report.docx"], trace_id=linked.trace_id
+        )
+
+        count, filenames = store.delete_all_conversations()
+
+        assert count == 2
+        assert filenames == ["report.docx"]
+        assert store.count() == 0
         store.close()

@@ -1,6 +1,6 @@
+// Modified by Gabriel_JP for the OpenJarvis local adaptation (2026-11-15).
 import { ChatArea } from '../components/Chat/ChatArea';
 import { SystemPanel } from '../components/Chat/SystemPanel';
-import { AssistantPresence } from '../components/Assistant/AssistantPresence';
 import { useAppStore } from '../lib/store';
 
 export function ChatPage() {
@@ -11,8 +11,14 @@ export function ChatPage() {
       <div className="flex-1 min-w-0">
         <ChatArea />
       </div>
-      {systemPanelOpen && <SystemPanel />}
-      <AssistantPresence />
+      <aside
+        aria-hidden={!systemPanelOpen}
+        className={`h-full shrink-0 overflow-hidden transition-all duration-200 ease-in-out ${
+          systemPanelOpen ? 'w-[280px] visible' : 'w-0 invisible pointer-events-none'
+        }`}
+      >
+        <SystemPanel />
+      </aside>
     </div>
   );
 }

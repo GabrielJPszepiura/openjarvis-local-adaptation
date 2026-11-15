@@ -1,9 +1,12 @@
 import { useState } from 'react';
+// Modified by the OpenJarvis local adaptation (2026-11-13): backend purge on chat deletion.
 import { AlertTriangle, Trash2 } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
+import { toast } from 'sonner';
 import type { TFunction } from 'i18next';
 import { useNavigate } from 'react-router';
 import { useAppStore } from '../../lib/store';
+import { deleteConversationData } from '../../lib/api';
 import { Button } from '../ui/button';
 import {
   Dialog,
@@ -190,8 +193,17 @@ export function ConversationList({ searchQuery }: Props) {
                 borderColor: 'color-mix(in srgb, var(--color-error) 28%, transparent)',
                 color: 'var(--color-error)',
               }}
-              onClick={() => {
+              onClick={async () => {
                 if (!pendingDeletion) return;
+                // The local store owns visible history; the server owns
+                // traces and generated artifacts. Keep the chat visible if
+                // the backend purge fails so deletion is never partial.
+                try {
+                  await deleteConversationData(pendingDeletion.id);
+                } catch {
+                  toast.error('Não foi possível apagar todos os dados desta conversa.');
+                  return;
+                }
                 deleteConversation(pendingDeletion.id);
                 setPendingDeletion(null);
               }}

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+# Modified by the OpenJarvis local adaptation (2026-11-14): log retention coverage.
+
 import os
 import secrets
 import subprocess
@@ -18,6 +20,7 @@ from openjarvis.cli import cli
 from openjarvis.cli.daemon_cmd import (
     _pid_alive,
     _read_pid,
+    _rotate_and_prune_server_log,
     _write_pid,
 )
 from openjarvis.core.utils import terminate_process
@@ -54,6 +57,25 @@ class TestDaemonCommands:
             tmp_path / "nonexistent.pid",
         ):
             assert _read_pid() is None
+
+    def test_server_log_retention_archives_current_and_prunes_old(self, tmp_path: Path) -> None:
+        """A fresh launch starts a new log and keeps only 30-day archives."""
+        import openjarvis.cli.daemon_cmd as daemon_cmd
+
+        log_file = tmp_path / "server.log"
+        log_file.write_text("previous session")
+        stale_archive = tmp_path / "server-older.log"
+        stale_archive.write_text("stale")
+        now = 1_800_000_000.0
+        os.utime(log_file, (now - 60,) * 2)
+        os.utime(stale_archive, (now - 31 * 24 * 60 * 60,) * 2)
+
+        with patch.object(daemon_cmd, "_LOG_FILE", log_file):
+            _rotate_and_prune_server_log(now=now)
+
+        assert not log_file.exists()
+        assert not stale_archive.exists()
+        assert len(list(tmp_path.glob("server-*.log"))) == 1
 
     def test_write_and_read_pid(self, tmp_path: Path) -> None:
         """Write a PID, then read it back with a successful liveness probe."""

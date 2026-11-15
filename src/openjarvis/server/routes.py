@@ -1,5 +1,7 @@
 """Route handlers for the OpenAI-compatible API server."""
 
+# Modified by the OpenJarvis local adaptation (2026-11-13): conversation data deletion.
+
 from __future__ import annotations
 
 import asyncio
@@ -8,6 +10,7 @@ import threading
 import uuid
 import weakref
 from dataclasses import replace
+from pathlib import Path
 from typing import Any
 from urllib.parse import quote
 
@@ -37,6 +40,136 @@ from openjarvis.server.models import (
 )
 
 router = APIRouter()
+
+
+def _register_generated_files(
+    trace_store: Any,
+    conversation_id: str | None,
+    files: list[GeneratedFileMeta],
+    *,
+    trace_id: str = "",
+) -> None:
+    """Persist the chat-to-file link used by conversation deletion."""
+    if trace_store is None or not conversation_id or not files:
+        return
+    try:
+        trace_store.register_generated_artifacts(
+            conversation_id,
+            [file.filename for file in files],
+            trace_id=trace_id,
+        )
+    except Exception:
+        logging.getLogger("openjarvis.server").debug(
+            "Could not register generated files for conversation deletion",
+            exc_info=True,
+        )
+
+
+def _delete_generated_files(request: Request, filenames: list[str]) -> int:
+    """Remove registered generated files from approved output roots only."""
+    if not filenames:
+        return 0
+    from openjarvis.tools.document_create import generated_output_roots
+
+    app_config = getattr(request.app.state, "config", None)
+    allowed_dirs = (
+        getattr(getattr(app_config, "security", None), "allowed_dirs", [])
+        if app_config is not None
+        else []
+    )
+    deleted_files = 0
+    for filename in filenames:
+        safe_name = Path(filename).name
+        if safe_name != filename:
+            continue
+        for root in generated_output_roots(allowed_dirs):
+            candidate = (root / safe_name).resolve()
+            if candidate.parent != root.resolve():
+                continue
+            try:
+                if candidate.is_file():
+                    candidate.unlink()
+                    deleted_files += 1
+            except OSError:
+                logging.getLogger("openjarvis.server").warning(
+                    "Could not remove generated file for deleted conversation: %s",
+                    safe_name,
+                )
+            break
+    return deleted_files
+
+
+@router.delete("/v1/conversations")
+async def delete_all_conversation_data(request: Request):
+    """Purge all local chat traces, artifacts, and automatic chat memory.
+
+    Includes traces created before conversation IDs existed, but does not touch
+    unrelated application configuration or connector data.
+    """
+    trace_store = getattr(request.app.state, "trace_store", None)
+    if trace_store is None:
+        return {"deleted_traces": 0, "deleted_files": 0, "deleted_memories": 0}
+    try:
+        trace_count, filenames = trace_store.delete_all_conversations()
+    except Exception as exc:
+        logging.getLogger("openjarvis.server").exception("Failed to clear conversation data")
+        raise HTTPException(
+            status_code=500, detail="Could not clear conversation data"
+        ) from exc
+
+    memory_service = getattr(request.app.state, "memory_service", None)
+    deleted_memories = 0
+    if memory_service is not None:
+        try:
+            deleted_memories = memory_service.clear_facts()
+        except Exception:
+            logging.getLogger("openjarvis.server").debug(
+                "Could not clear automatic memory", exc_info=True
+            )
+    return {
+        "deleted_traces": trace_count,
+        "deleted_files": _delete_generated_files(request, filenames),
+        "deleted_memories": deleted_memories,
+    }
+@router.delete("/v1/conversations/{conversation_id}")
+async def delete_conversation_data(conversation_id: str, request: Request):
+    """Purge backend traces and generated artifacts for one chat.
+
+    The browser deletes its local message copy separately. This endpoint is
+    idempotent, so a second deletion is safe after a retry.
+    """
+    if not conversation_id or len(conversation_id) > 128:
+        raise HTTPException(status_code=400, detail="Invalid conversation ID")
+    trace_store = getattr(request.app.state, "trace_store", None)
+    if trace_store is None:
+        return {"deleted_traces": 0, "deleted_files": 0}
+    try:
+        trace_count = trace_store.count_for_conversation(conversation_id)
+        filenames = trace_store.delete_conversation(conversation_id)
+    except Exception as exc:
+        logging.getLogger("openjarvis.server").exception(
+            "Failed to delete conversation data"
+        )
+        raise HTTPException(
+            status_code=500, detail="Could not delete conversation data"
+        ) from exc
+
+    memory_service = getattr(request.app.state, "memory_service", None)
+    deleted_memories = 0
+    if memory_service is not None:
+        try:
+            deleted_memories = memory_service.delete_conversation(conversation_id)
+        except Exception:
+            logging.getLogger("openjarvis.server").debug(
+                "Could not delete automatic memory for conversation",
+                exc_info=True,
+            )
+
+    return {
+        "deleted_traces": trace_count,
+        "deleted_files": _delete_generated_files(request, filenames),
+        "deleted_memories": deleted_memories,
+    }
 
 
 def _to_messages(chat_messages) -> list[Message]:
@@ -415,6 +548,7 @@ async def chat_completions(request_body: ChatCompletionRequest, request: Request
         response,
         bus=getattr(request.app.state, "bus", None),
         source="server.chat",
+        conversation_id=request_body.conversation_id or "",
     )
     return response
 
@@ -435,11 +569,13 @@ def _record_completed_exchange(
     *,
     bus=None,
     source: str = "server.chat",
+    conversation_id: str = "",
 ) -> None:
     """Publish or submit a completed exchange without blocking a reply."""
     if not user_text:
         return
     try:
+        memory_source = f"conversation:{conversation_id}" if conversation_id else source
         if bus is not None:
             from openjarvis.memory import publish_completed_exchange
 
@@ -447,10 +583,15 @@ def _record_completed_exchange(
                 bus,
                 user_text,
                 assistant_text,
-                source=source,
+                source=memory_source,
             )
         elif memory_service is not None:
-            memory_service.submit(user_text, assistant_text)
+            try:
+                memory_service.submit(user_text, assistant_text, source=memory_source)
+            except TypeError:
+                # Preserve compatibility with integrations implementing the
+                # earlier two-argument MemoryService protocol.
+                memory_service.submit(user_text, assistant_text)
     except Exception:  # noqa: BLE001 — memory is best-effort, never fail a reply
         logging.getLogger("openjarvis.server").debug(
             "Memory submit failed",
@@ -465,6 +606,7 @@ def _remember_exchange(
     *,
     bus=None,
     source: str = "server.chat",
+    conversation_id: str = "",
 ) -> None:
     """Record a completed non-streaming exchange."""
     _record_completed_exchange(
@@ -473,6 +615,7 @@ def _remember_exchange(
         _response_content(response),
         bus=bus,
         source=source,
+        conversation_id=conversation_id,
     )
 
 
@@ -783,7 +926,12 @@ def _handle_agent(
             if trace_store is not None:
                 from openjarvis.traces.collector import TraceCollector
 
-                collector = TraceCollector(agent, store=trace_store, bus=bus)
+                collector = TraceCollector(
+                    agent,
+                    store=trace_store,
+                    bus=bus,
+                    conversation_id=req.conversation_id or "",
+                )
                 result = collector.run(input_text, context=ctx)
             else:
                 result = agent.run(input_text, context=ctx)
@@ -810,6 +958,12 @@ def _handle_agent(
     generated_files = _generated_files_from_agent_result(
         result,
         collector.last_trace if collector is not None else None,
+    )
+    _register_generated_files(
+        trace_store,
+        req.conversation_id,
+        generated_files,
+        trace_id=(collector.last_trace.trace_id if collector and collector.last_trace else ""),
     )
 
     return ChatCompletionResponse(
@@ -996,6 +1150,7 @@ async def _handle_agent_stream(
             content,
             bus=bus,
             source="server.chat.stream",
+            conversation_id=req.conversation_id or "",
         )
         yield "data: [DONE]\n\n"
 
@@ -1126,6 +1281,7 @@ async def _handle_stream_tools(
                 full_content,
                 bus=bus,
                 source="server.chat.stream",
+                conversation_id=req.conversation_id or "",
             )
         yield "data: [DONE]\n\n"
 
@@ -1286,6 +1442,7 @@ async def _handle_stream(
                 engine=actual_telemetry_engine,
                 started_at=started_at,
                 ended_at=time.time(),
+                conversation_id=req.conversation_id or "",
             )
 
         if full_content:
@@ -1295,6 +1452,7 @@ async def _handle_stream(
                 full_content,
                 bus=bus,
                 source="server.chat.stream",
+                conversation_id=req.conversation_id or "",
             )
 
         # Send finish chunk with usage data if available

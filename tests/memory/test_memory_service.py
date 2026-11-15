@@ -1,5 +1,7 @@
 """Tests for the background memory service (openjarvis.memory.service)."""
 
+# Modified by the OpenJarvis local adaptation (2026-11-13): conversation memory deletion coverage.
+
 from __future__ import annotations
 
 import threading
@@ -262,6 +264,19 @@ def test_submit_extracts_and_stores(tmp_path):
         assert svc.submit("I love hiking", "Nice!") is True
         assert _wait_until(lambda: svc.fact_count() == 1)
         assert [f.text for f in svc.list_facts()] == ["User likes hiking"]
+    finally:
+        svc.stop()
+
+
+def test_delete_conversation_removes_its_automatic_memory(tmp_path):
+    svc = _service(tmp_path, FakeExtractor(["User likes hiking"]))
+    svc.start()
+    try:
+        assert svc.submit("I love hiking", "Nice!", source="conversation:chat-a")
+        assert _wait_until(lambda: svc.fact_count() == 1)
+        assert svc.delete_conversation("chat-a") == 1
+        assert svc.fact_count() == 0
+        assert svc.submit("I love hiking", "Nice!", source="conversation:chat-a") is False
     finally:
         svc.stop()
 

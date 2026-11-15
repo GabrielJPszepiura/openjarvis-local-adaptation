@@ -1,4 +1,5 @@
 import { create } from 'zustand';
+// Modified by the OpenJarvis local adaptation (2026-11-13): UUID conversation identifiers.
 import type {
   Conversation,
   ChatMessage,
@@ -54,6 +55,13 @@ interface ConversationStore {
 
 function generateId(): string {
   return Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
+}
+
+function generateConversationId(): string {
+  // Conversation IDs cross the browser/backend boundary and are used to
+  // purge traces and artifacts. Prefer a UUID while preserving a fallback
+  // for older embedded webviews.
+  return globalThis.crypto?.randomUUID?.() ?? generateId();
 }
 
 function loadConversations(): ConversationStore {
@@ -357,11 +365,18 @@ export const useAppStore = create<AppState>((set, get) => {
 
     loadConversations: () => {
       const store = loadConversations();
+      const activeConversation = store.activeId
+        ? store.conversations[store.activeId]
+        : null;
       set({
         conversations: Object.values(store.conversations).sort(
           (a, b) => b.updatedAt - a.updatedAt,
         ),
         activeId: store.activeId,
+        // The settings page uses this action after "Limpar todos os dados".
+        // Clear the visible transcript too; otherwise navigating back to chat
+        // can show a deleted conversation until the browser is refreshed.
+        messages: activeConversation ? activeConversation.messages : [],
       });
     },
 
@@ -404,7 +419,7 @@ export const useAppStore = create<AppState>((set, get) => {
     createConversation: (model?: string) => {
       const store = loadConversations();
       const conv: Conversation = {
-        id: generateId(),
+        id: generateConversationId(),
         title: 'New chat',
         createdAt: Date.now(),
         updatedAt: Date.now(),
