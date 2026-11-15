@@ -578,7 +578,8 @@ class TestOrchestratorAgent:
                 role=Role.ASSISTANT,
                 content=(
                     "Resposta anterior.\n<!-- openjarvis-research-sources:"
-                    '[{"title":"Fonte usada","url":"https://example.gov.br/dado"}] -->'
+                    '[{"title":"Fonte usada","url":"https://example.gov.br/dado",'
+                    '"summary":"Apresenta dados turísticos usados na recomendação."}] -->'
                 ),
             )
         )
@@ -587,6 +588,8 @@ class TestOrchestratorAgent:
 
         assert web.calls == []
         assert "[Fonte usada](https://example.gov.br/dado)" in result.content
+        assert "Apresenta dados turísticos usados na recomendação." in result.content
+        assert "fonte secundária" not in result.content
         assert engine.generate.call_count == 0
 
     def test_source_question_without_ledger_does_not_generate_sources(self):
