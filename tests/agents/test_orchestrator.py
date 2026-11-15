@@ -661,6 +661,20 @@ class TestOrchestratorAgent:
             for message in messages
         )
 
+    def test_public_web_query_is_not_blocked_by_unrelated_history_pii(self):
+        engine = _make_engine_no_tools("A cotação foi encontrada.")
+        web = _WebSearchStub()
+        agent = OrchestratorAgent(engine, "test-model", tools=[web])
+        context = AgentContext()
+        context.conversation.add(
+            Message(role=Role.USER, content="Meu e-mail é pessoa@example.com."),
+        )
+
+        result = agent.run("Qual é a cotação do dólar atualmente?", context=context)
+
+        assert web.calls
+        assert result.metadata["tool_route"] == "web_only"
+
     def test_context_countries_deduplicate_england_from_united_kingdom(self):
         countries = _countries_from_context(
             [
