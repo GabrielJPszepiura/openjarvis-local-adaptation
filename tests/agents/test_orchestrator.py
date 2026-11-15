@@ -323,6 +323,15 @@ class TestOrchestratorAgent:
         assert "uma única fonte traga a lista completa" in grounded
         assert "não recuse uma lista" in grounded
 
+    def test_requested_three_item_list_gets_complementary_research_coverage(self):
+        request = "Pesquise 3 melhores países para turismo."
+
+        queries = _web_search_queries(request)
+        grounded = _web_grounded_input(request, "Resultados antigos.", show_links=False)
+
+        assert len(queries) == 3
+        assert "ainda responda com o melhor material encontrado" in grounded
+
     def test_generic_list_request_preserves_the_requested_item_kind(self):
         assert _requested_item_kind("Quais são cinco notebooks recomendados?") == "notebooks"
         assert _requested_item_kind("Liste 5 bancos atuais.") == "bancos"
